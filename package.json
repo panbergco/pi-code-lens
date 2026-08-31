@@ -1,0 +1,53 @@
+{
+  "name": "pi-code-lens",
+  "version": "0.2.0",
+  "description": "code-lens as a native pi extension \u2014 one surface over two code-intelligence engines: semantic recall proposes, the knowledge graph disposes. Client-only: talks to the already-running shared lens service.",
+  "type": "module",
+  "bin": {
+    "lens": "./bin/lens.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "doctor": "node bin/lens.mjs doctor",
+    "parity": "node bin/lens.mjs doctor --parity",
+    "build:test": "tsc extensions/index.ts --outDir .test-dist --rootDir . --module ES2022 --target ES2023 --moduleResolution bundler --skipLibCheck --strict false || true; bash scripts/link-pi-packages.sh",
+    "test": "npm run build --silent && npm run build:test --silent && for t in test/*.mjs; do node \"$t\" || exit 1; done"
+  },
+  "codeLens": {
+    "comment": "The two capability engines are EXTERNAL PROCESSES, not npm imports. They are installed and supervised by `lens install`, and reached over a socket/CLI. Versions here are the tested floor, asserted by `lens doctor`.",
+    "engines": {
+      "graph": {
+        "package": "gitnexus",
+        "installer": "npm i -g gitnexus@latest",
+        "testedWith": "1.6.9",
+        "transport": "mcp-http",
+        "defaultUrl": "http://127.0.0.1:3737/mcp"
+      },
+      "semantic": {
+        "package": "cocoindex-code[full]",
+        "installer": "uv tool install --upgrade 'cocoindex-code[full]' --with 'mcp<2'",
+        "testedWith": "ccc >= 0.4",
+        "transport": "cli-json",
+        "binary": "ccc"
+      }
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  },
+  "license": "MIT",
+  "private": true
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+.scratch/
+# Engine indexes must never enter git — one measured 93 MB.
+.gitnexus/
+.cocoindex_code/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+
+# Personal agent state written by other tooling — never part of this package.
+/AGENTS.md
+.test-dist/

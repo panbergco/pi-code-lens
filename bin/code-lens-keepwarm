@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Keep both engine models resident in GPU memory.
+#
+# WHY THIS EXISTS: the semantic engine's daemon unloads its model after an idle
+# period (observed ~3h). Resident-now is not resident-later, so "hot loaded"
+# without a keep-warm is a claim that quietly stops being true — the next
+# question after the timeout pays a full cold load.
+#
+# Each ping is a real but trivial query, because only real use resets an idle
+# timer. Failures are silent by design: this runs on a timer and must never
+# spam the journal when a repo is mid-reindex.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin"
+
+# --- semantic engine: touch it inside a repo it has actually indexed ---------
+# Candidates are the repos passed in, then the ones the semantic daemon itself
+# reports. Asking the daemon avoids assuming any checkout layout, and a daemon
+# that is already down has no resident model to keep warm.
+# Simplification: word-split on the daemon's list. A checkout path containing
+# spaces would need a real parser, and no engine supports one today anyway.
+for repo in "$@" $(ccc daemon status 2>/dev/null | awk '/^ *Projects:/ {f=1; next} f && NF {print $1}'); do
+  [ -d "$repo/.cocoindex_code" ] || continue
+  ( cd "$repo" && timeout 120 ccc search "keepwarm" --limit 1 --json >/dev/null 2>&1 ) && break
+done
+
+# --- graph engine: the MCP server holds its own model; one tool call is enough
+U="${LENS_GRAPH_URL:-http://127.0.0.1:3737/mcp}"
+CT=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"keepwarm","version":"1"}}}'
+SID=$(curl -si -m 10 "$U" -X POST "${CT[@]}" -d "$INIT" 2>/dev/null \
+      | grep -i '^mcp-session-id:' | tr -d '\r' | awk '{print $2}')
+[ -n "${SID:-}" ] && CT+=(-H "Mcp-Session-Id: $SID")
+curl -s -m 10 -o /dev/null "$U" -X POST "${CT[@]}" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' 2>/dev/null
+curl -s -m 120 -o /dev/null "$U" -X POST "${CT[@]}" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"search_query":"keepwarm"}}}' 2>/dev/null
+
+echo "code-lens keep-warm: pinged both engines at $(date -Is)"
