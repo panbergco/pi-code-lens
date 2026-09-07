@@ -22,8 +22,8 @@
     "dev": "tsc -p tsconfig.json --watch",
     "doctor": "node bin/lens.mjs doctor",
     "parity": "node bin/lens.mjs doctor --parity",
-    "build:test": "tsc extensions/index.ts --outDir .test-dist --rootDir . --module ES2022 --target ES2023 --moduleResolution bundler --skipLibCheck --strict false || true; bash scripts/link-pi-packages.sh",
-    "test": "npm run build --silent && npm run build:test --silent && for t in test/*.mjs; do node \"$t\" || exit 1; done"
+    "build:test": "tsc extensions/index.ts --outDir .test-dist --rootDir . --module ES2022 --target ES2023 --moduleResolution bundler --skipLibCheck --noCheck && bash scripts/link-pi-packages.sh",
+    "test": "npm run build --silent && npm run build:test --silent && mkdir -p .scratch && for t in test/*.mjs; do node \"$t\" || exit 1; done"
   },
   "codeLens": {
     "comment": "The two capability engines are EXTERNAL PROCESSES, not npm imports. They are installed and supervised by `lens install`, and reached over a socket/CLI. Versions here are the tested floor, asserted by `lens doctor`.",

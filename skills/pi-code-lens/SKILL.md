@@ -1,20 +1,13 @@
 ---
 name: pi-code-lens
 description: >-
-  Search, understand, change, and review code using the pi-code-lens tools lens_ask,
-  lens_breaks, lens_graph, and lens_semantic. Use for every codebase question or edit:
-  where or how something is implemented, why a bug or failure happens, what code to change,
-  what a function or class affects, whether an edit is safe, and what a change breaks. Use
-  before ripgrep, grep, find, or reading many files to locate code, and before editing any
-  function, class, or method. Also use when asked to explore an unfamiliar repository,
-  review a change, or check for duplicate functionality.
-  Examples that should trigger it — finding code: "Where is X handled?", "How does the
-  auth flow work?", "Which file owns Y?", "Show me where we parse Z". Before changing
-  code: "Is it safe to change X?", "What depends on this function?", "What breaks if I
-  rename Y?", "What calls this?". Debugging: "Why is X failing?", "Where does this error
-  come from?", "Trace this bug". Reviewing: "Review this branch", "What did this change
-  actually move?", "Is this PR risky?". Refactoring: "Rename this function safely",
-  "Extract this into a module", "Does a helper for this already exist?".
+  Search, understand, change, and review code with lens_ask, lens_breaks, lens_graph,
+  and lens_semantic. Use for codebase questions or edits: where or how something is
+  implemented, why a failure happens, what to change, what depends on a symbol, whether
+  an edit is safe, what a change breaks, and whether a helper already exists. Use before
+  broad grep/find searches or reading many files to locate code, and before editing a
+  function, class, or method. Trigger for architecture exploration, debugging, impact
+  analysis, change review, refactoring, and unfamiliar repositories.
 compatibility: >-
   Requires the pi-code-lens extension tools and both indexing engines (GitNexus and
   cocoindex-code). Run `lens install --hot-load` once per machine and index each repository.
