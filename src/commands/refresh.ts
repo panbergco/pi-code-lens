@@ -56,8 +56,22 @@ export interface RepoState {
  * expensive ones hourly. A repo whose commit has not moved is a ~9 s no-op
  * either way, so an idle hour costs almost nothing.
  */
-const EXPENSIVE_MS = 60_000;
-const EXPENSIVE_INTERVAL_MS = 60 * 60_000;
+const HOUR_MS = 60 * 60_000;
+
+/**
+ * How long this repo must wait between rebuilds, from what its last one cost.
+ *
+ * The rule used to be a cliff: over 60s, defer a full hour. a large monorepo
+ * measured 121s, so it sat 19-43 commits behind permanently — and after the
+ * scope fix it measured 58.7s, which is the same cliff a second away in the
+ * other direction. A threshold that decides an hour of staleness on a
+ * one-second difference is not a policy, it is a coin toss.
+ *
+ * So: a rebuild may consume at most a tenth of the time since the last one.
+ * 10s costs a 100s wait (every cycle), 60s costs 10 minutes (every cycle),
+ * 121s costs 20 minutes, and nothing is ever deferred beyond an hour.
+ */
+export const minGapMs = (graphMs = 0) => Math.min(HOUR_MS, graphMs * 10);
 
 /**
  * Scope config fingerprint. Editing what is indexed does NOT move the commit,
@@ -310,12 +324,12 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
         const layers = await detectLayers(r.name, st, r.dir);
         const hash = scopeHash(r.dir);
         const scopeChanged = st.scopeHash !== undefined && st.scopeHash !== hash;
-        const expensive = (st.graphMs ?? 0) > EXPENSIVE_MS;
-        const dueByCost = !expensive || !st.graphAt ||
-                          Date.now() - st.graphAt > EXPENSIVE_INTERVAL_MS;
+        const gap = minGapMs(st.graphMs);
+        const waited = Date.now() - (st.graphAt ?? 0);
+        const dueByCost = !st.graphAt || waited > gap;
 
         if (!dueByCost && !scopeChanged) {
-          const mins = Math.round((EXPENSIVE_INTERVAL_MS - (Date.now() - (st.graphAt ?? 0))) / 60_000);
+          const mins = Math.max(1, Math.round((gap - waited) / 60_000));
           console.log(`  graph: deferred ~${mins} min — last rebuild took ` +
                       `${((st.graphMs ?? 0) / 1000).toFixed(0)}s and this engine has no delta`);
         } else {

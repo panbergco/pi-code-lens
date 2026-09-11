@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectLayers, indexRunning, loadEngineEnv, saveState } from '../dist/commands/refresh.js';
+import { detectLayers, indexRunning, loadEngineEnv, saveState, minGapMs } from '../dist/commands/refresh.js';
 
 // ── every indexing pass must be recognised, including the vector one ─────────
 // These decoys look EXACTLY like a real indexing pass, because that is the
@@ -151,3 +151,15 @@ process.exit(0);
   assert.equal(after.alpha.graphMs, 99, 'the pass still records what it measured');
   assert.equal(after.beta.graphMs, 2, 'a repo this pass never touched is left alone');
 }
+
+
+// ── cost decides the wait, in proportion — never as a cliff ─────────────────
+// The old rule deferred anything over 60s by a full hour. a large monorepo came
+// in at 121s and sat 19-43 commits behind permanently; after the scope fix it
+// came in at 58.7s, on the same cliff from the other side. A second of measured
+// cost must not decide an hour of staleness.
+assert.equal(minGapMs(5_000), 50_000, 'a cheap repo waits a trivial gap and refreshes every cycle');
+assert.equal(minGapMs(58_700), 587_000, 'the measured cost of this repo stays under a 15-minute cycle');
+assert.equal(minGapMs(121_000), 1_210_000, 'twice the cost buys twice the wait, not twenty times');
+assert.equal(minGapMs(3_600_000), 3_600_000, 'and nothing is ever deferred beyond an hour');
+assert.equal(minGapMs(), 0, 'a repo never measured is due now');
