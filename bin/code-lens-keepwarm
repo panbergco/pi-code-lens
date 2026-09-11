@@ -12,6 +12,14 @@
 set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin"
 
+# The graph engine's GPU mask must not travel to the semantic one. An empty
+# CUDA_VISIBLE_DEVICES is set deliberately for GitNexus (its embeddings belong on
+# the NPU), and an empty mask hides the GPU from PyTorch entirely — so a ping
+# carrying it can START the daemon blind, and every query for that daemon's whole
+# life then fails with "No CUDA GPUs are available". A keep-warm that breaks the
+# thing it keeps warm is worse than no keep-warm.
+[ "${CUDA_VISIBLE_DEVICES-unset}" = "" ] && unset CUDA_VISIBLE_DEVICES
+
 # --- semantic engine: touch it inside a repo it has actually indexed ---------
 # Candidates are the repos passed in, then the ones the semantic daemon itself
 # reports. Asking the daemon avoids assuming any checkout layout, and a daemon

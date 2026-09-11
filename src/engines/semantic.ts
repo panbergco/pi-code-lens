@@ -14,12 +14,35 @@ import type { Candidate, Engine, Health, Query } from './types.js';
 const run = promisify(execFile);
 const BIN = process.env.LENS_SEMANTIC_BIN ?? 'ccc';
 
+/**
+ * The environment this engine may be reached with — specifically, WITHOUT the
+ * graph engine's GPU mask.
+ *
+ * `CUDA_VISIBLE_DEVICES=` (empty) is set deliberately for GitNexus, whose
+ * embedding pass belongs on the NPU and must not touch the GPU. It is inherited
+ * by everything downstream, and an empty mask hides the GPU from PyTorch
+ * completely — so the first `ccc` invocation to carry it starts a daemon that
+ * reports "No CUDA GPUs are available" and fails every multi-word query from
+ * then on, for the life of that daemon. Measured: recall was dead on this
+ * machine and the failure read as two 121-second timeouts in a real session,
+ * with nothing naming the cause.
+ *
+ * One engine's device policy must not travel to the other. An explicitly
+ * non-empty value is left alone: that is somebody choosing a device, not the
+ * graph engine's mask leaking.
+ */
+export function cccEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (env.CUDA_VISIBLE_DEVICES !== '') return env;
+  const { CUDA_VISIBLE_DEVICES: _mask, ...rest } = env;
+  return rest;
+}
+
 export class SemanticEngine implements Engine {
   readonly id = 'semantic' as const;
   constructor(private cwd: string = process.cwd()) {}
 
   private async ccc(args: string[], timeout = 120_000, cwd = this.cwd) {
-    return run(BIN, args, { cwd, timeout, maxBuffer: 32 << 20 });
+    return run(BIN, args, { cwd, timeout, maxBuffer: 32 << 20, env: cccEnv() });
   }
 
   /**

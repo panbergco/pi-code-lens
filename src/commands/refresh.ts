@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { GraphEngine } from '../engines/graph.js';
+import { cccEnv } from '../engines/semantic.js';
 
 const run = promisify(execFile);
 const STATE = join(homedir(), '.code-lens', 'refresh-state.json');
@@ -386,8 +387,11 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
         else {
           const t0 = Date.now();
           try {
+            // Same rule as the query path: the graph engine's empty GPU mask
+            // must not reach ccc, or the daemon this starts is blind to the GPU
+            // for its whole life (see cccEnv).
             const { stdout } = await run('ccc', ['index'],
-              { cwd: r.dir, timeout: 14_400_000, maxBuffer: 32 << 20 });
+              { cwd: r.dir, timeout: 14_400_000, maxBuffer: 32 << 20, env: cccEnv() });
             const n = /(\d+)\s+added/.exec(stdout)?.[1] ?? '?';
             console.log(`  semantic: updated in ${((Date.now() - t0) / 1000).toFixed(0)}s (${n} files added)`);
             st.semanticCommit = commit ?? undefined;
