@@ -48,6 +48,7 @@ const handlers = {};
 let notified = '';
 const pi = {
   registerTool: () => {},
+  getActiveTools: () => ['read', 'bash', 'lens_ask', 'lens_breaks', 'lens_graph', 'lens_semantic'],
   registerCommand: (_name, spec) => { handlers.command = spec.handler; },
   on: (name, fn) => { handlers[name] = fn; },
 };
@@ -135,3 +136,53 @@ assert.equal(out, undefined, 'and got its result unchanged');
 
 rmSync(repo, { recursive: true, force: true });
 console.log('ok — the hook appends, remembers, obeys its toggle, and never holds up a search');
+
+
+// ── the prompt is answered BEFORE the agent acts ────────────────────────────
+// The measured failure of the old design: it only spoke after a search, which
+// requires the agent to take the slow path first. Over 26 days the agents chose
+// a lens tool 66 times in 77,029 calls, so "after a search" is a channel that
+// mostly never opens. This drives the real before_agent_start handler.
+{
+  // The suite tore its fixture down above; this block needs an indexed repo again.
+  mkdirSync(join(repo, '.gitnexus'), { recursive: true });
+  writeFileSync(join(repo, '.gitnexus', 'meta.json'),
+    JSON.stringify({ lastCommit: 'a'.repeat(40), indexedAt: new Date().toISOString() }));
+  const start = (prompt) => handlers.before_agent_start({ prompt, systemPrompt: 'You are a coding assistant.' }, ctx);
+  const packOf = (r) => String(r?.message?.content ?? '');
+
+  reset();
+  let r = await start('where does the lane grant get refused?');
+  assert.ok(packOf(r).includes('what the index already knows'), 'the prompt itself is answered up front');
+  assert.ok(packOf(r).includes('writeLane'), 'and the pack names the spot');
+  assert.ok(/do not grep for what is listed/.test(packOf(r)), 'with the one instruction that replaces the search');
+
+  // Novelty: the same spot is not spent twice on the same session.
+  reset();
+  r = await start('and where is the lane grant refused, again?');
+  assert.equal(r?.message, undefined, 'a spot already shown is not re-injected');
+
+  // Conversational turns cost nothing at all.
+  reset();
+  r = await start('yes go on');
+  assert.equal(r?.message, undefined, 'a short prompt is never probed');
+  assert.deepEqual(calls, [], 'and never reaches the engines');
+
+  // Nothing strong: say the useful thing, but only twice per session.
+  reset();
+  answer = null;
+  const a = await start('please refactor the entire billing subsystem now');
+  const b = await start('now do the same for the reporting subsystem too');
+  const c = await start('and then the notifications subsystem as well');
+  assert.ok(/no strong structural match/.test(packOf(a)), 'a weak match says so, once');
+  assert.ok(/no strong structural match/.test(packOf(b)), 'and twice');
+  assert.equal(c?.message, undefined, 'but never becomes wallpaper');
+
+  // The directive still rides along, with its call discipline.
+  assert.ok(/Pick the ONE lens tool/.test(String(a?.systemPrompt ?? '')),
+    'the always-on directive carries call discipline');
+}
+
+console.log('ok — the prompt is answered before the agent acts, once per spot, twice at most when weak');
+
+rmSync(repo, { recursive: true, force: true });

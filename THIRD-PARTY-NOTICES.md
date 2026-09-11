@@ -42,3 +42,14 @@ Two designs were studied and adapted from MIT-licensed projects, as credited in
   answered and unanswerable subjects, and a hard cap on what gets appended: from
   **pi-gitnexus 0.6.4**. The extraction rules were rewritten and the lookup replaced with
   this project's routed two-engine pipeline.
+- **Answering the prompt before the agent acts, and freshness on the read path** — from
+  **Graft** (`github.com/trailhq/Graft`, MIT), read at commit `f9e6539`. Four ideas, each
+  reimplemented here against pi's own extension API: retrieval injected from the prompt
+  hook rather than after a search (`src/claude/hooks.ts`); a pointers-only pack, because a
+  per-prompt injection is full-price input every turn while a pull is paid for once
+  (`src/claude/format.ts`); a novelty gate plus a capped nudge when nothing matches
+  strongly, which their own comment records as the fix for an agent that grepped 38 times
+  rather than pulling (same file); and freshness measured against **working-tree bytes** on
+  the query path instead of a timer (`src/graph/fingerprint.ts`, `src/graph/refresh.ts`).
+  Their structural rebuild is ~3 ms so it rebuilds inside the query; ours takes 30-60 s, so
+  only the *trigger* moved onto the read path. No Graft source is included here.

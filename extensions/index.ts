@@ -572,19 +572,45 @@ export default function piCodeLens(pi: ExtensionAPI) {
   // template) replaces that prompt wholesale and the tools go silent — registered, callable,
   // and never mentioned. So re-state the rule per turn, and only when it is genuinely absent,
   // to avoid paying for the same instruction twice.
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     const active = pi.getActiveTools();
     const tools = LENS_TOOLS.filter((t) => active.includes(t));
     if (!tools.length) return;
-    if (ANNOUNCED_BY_PI.test(event.systemPrompt) || event.systemPrompt.includes(RULES_HEADING)) return;
-    return {
-      systemPrompt:
+
+    // ── the push channel ────────────────────────────────────────────────────
+    // Answer the PROMPT, before the agent acts on it. Until now this extension
+    // only spoke after a search had already run, which requires the agent to
+    // choose the slow path first — and measured over 26 days it chose the tools
+    // itself 66 times in 77,029 calls. Graft (trailhq/Graft, MIT, src/claude/
+    // hooks.ts:445) puts retrieval on the prompt hook for exactly this reason;
+    // their own comment records the same finding from the other side: they
+    // assumed a skipped pack was recoverable because "the agent pulls", traced a
+    // session, and found it grepped 38 times instead.
+    const pack = await promptPack(event.prompt, ctx.cwd);
+
+    const announced = ANNOUNCED_BY_PI.test(event.systemPrompt) || event.systemPrompt.includes(RULES_HEADING);
+    const result: { systemPrompt?: string; message?: any } = {};
+    if (!announced) {
+      result.systemPrompt =
         `${event.systemPrompt}\n\n${RULES_HEADING} (${tools.join(", ")})\n` +
         "- Use lens_ask before grep/find for where code lives, how it works, or what to change.\n" +
         "- Use lens_breaks on a function, class or method before editing it.\n" +
         '- Use lens_graph with tool "detect_changes" before committing.\n' +
-        "- Load the pi-code-lens skill for the full sequence.",
-    };
+        // Call discipline, after Graft's directive (format.ts:219): the failure
+        // mode of a retrieval tool is not being ignored, it is being called four
+        // times with the question reworded.
+        "- Pick the ONE lens tool that fits and act on its answer; most tasks need a single call. " +
+        "Do not re-ask the same question reworded — switch tool or switch to reading the file.\n" +
+        "- Load the pi-code-lens skill for the full sequence.";
+    }
+    if (pack) {
+      result.message = {
+        customType: "code-lens-context",
+        content: pack,
+        display: false,   // the model needs it; the human already has their own screen
+      };
+    }
+    return Object.keys(result).length ? result : undefined;
   });
 
   // Staleness created in-session → refresh on the event, not the clock.
@@ -658,6 +684,60 @@ export default function piCodeLens(pi: ExtensionAPI) {
   /** Commits behind HEAD past which a structural claim is not worth making.
    *  Roughly an hour of a busy repo's history. */
   const MAX_BEHIND = 30;
+
+  // ── per-prompt retrieval, ported from Graft's prompt hook ────────────────────
+  // (trailhq/Graft, MIT: src/claude/hooks.ts:445-462, src/claude/format.ts:150-209)
+
+  /** Shorter than this is conversational — "yes", "go on", "thanks" — and no gate
+   *  can judge it. Graft's own floor, hooks.ts:20. */
+  const MIN_PROMPT_CHARS = 12;
+  /** How many already-shown spots a session remembers, so the same pointer is
+   *  never injected twice. Graft's cap, format.ts:155. */
+  const INJECTED_CAP = 40;
+  /** Nudges one session may spend when the index has nothing strong. A line that
+   *  appears every turn stops being read. Graft's NUDGE_CAP, format.ts:161. */
+  const NUDGE_CAP = 2;
+
+  const injected = new Set<string>();
+  let nudges = 0;
+
+  /**
+   * What to put in front of the agent for THIS prompt, or nothing.
+   *
+   * Pointers only, never inlined code: a per-prompt injection is fresh
+   * full-price input on every turn, while what the agent pulls itself is paid
+   * for once, when it is actually wanted (Graft, format.ts:108-114).
+   */
+  async function promptPack(prompt: string, cwd: string): Promise<string | undefined> {
+    if (!settings.augment) { trace("prompt: augment off"); return undefined; }
+    const q = (prompt ?? "").trim();
+    if (q.length < MIN_PROMPT_CHARS) { trace("prompt: too short", q); return undefined; }
+    const state = freshness(cwd).state;
+    if (state === "unindexed") { trace("prompt: unindexed", cwd); return undefined; }
+    try {
+      const answer = await answerFor(q, cwd, settings.timeoutMs, settings.budgetTokens);
+      if (!answer) {
+        // Silence is not free. Graft measured the alternative: assuming the agent
+        // would reach for the tool on its own, it grepped 38 times instead. Say
+        // the one useful thing, twice per session, then stop.
+        if (nudges >= NUDGE_CAP) return undefined;
+        nudges++;
+        return `[code-lens] no strong structural match for this prompt — the index holds more than ` +
+               `this probe found. Try lens_ask "<your task>" before grepping.`;
+      }
+      // Novelty: a spot already shown this session is not news, and re-injecting
+      // it spends the reader's context to tell them something they have.
+      const lines = answer.body.split("\n").filter((l) => !injected.has(l.trim()) || !/^\d+\./.test(l.trim()));
+      const fresh = answer.body.split("\n").filter((l) => /^\s*\d+\./.test(l) && !injected.has(l.trim()));
+      if (!fresh.length) return undefined;
+      for (const l of fresh) {
+        injected.add(l.trim());
+        if (injected.size > INJECTED_CAP) injected.delete(injected.values().next().value as string);
+      }
+      return `[code-lens — what the index already knows about this task]\n${lines.join("\n")}\n` +
+             `Follow a pointer with lens_ask or lens_breaks; do not grep for what is listed above.`;
+    } catch { return undefined; }   // a pack is never worth failing a turn over
+  }
 
   async function answerFor(subject: string, cwd: string, budgetMs = settings.timeoutMs, budgetTokens = settings.budgetTokens) {
     const key = subject.toLowerCase();

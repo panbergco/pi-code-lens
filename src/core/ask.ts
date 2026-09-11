@@ -11,6 +11,8 @@ import { SemanticEngine } from '../engines/semantic.js';
 import type { Candidate, Neighbourhood } from '../engines/types.js';
 import { route, type Plan } from './router.js';
 import { fuse, DEFAULT_WEIGHTS, type Spot } from './fuse.js';
+import { healIfStale, workingTreeDrift } from './heal.js';
+import { indexRunning } from '../commands/refresh.js';
 
 export interface AskInput {
   question: string;
@@ -94,27 +96,51 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
     const target = repo ?? guess;
     const covered = gh.up && gh.repos.some((r) => r === target || r.endsWith(`/${target}`));
     if (!covered) {
-      notes.push(`structure unavailable: the graph engine has no index for "${target}" ` +
-                 `(indexed: ${gh.repos.join(', ') || 'none'}) — run: gitnexus analyze`);
+      // "No index" and "index being rewritten right now" look identical from
+      // here, and telling a reader to run the build that IS running sends them
+      // to stamp on a pass already in flight. Healing on the read path made this
+      // common rather than rare: a lagging index now rebuilds because it was
+      // asked, so a question during that window is normal, not an error.
+      const pass = indexRunning();
+      notes.push(pass
+        ? `structure is being rebuilt right now (${pass} pass in flight) — ask again in a moment; ` +
+          `text matches below are unaffected`
+        : `structure unavailable: the graph engine has no index for "${target}" ` +
+          `(indexed: ${gh.repos.join(', ') || 'none'}) — run: gitnexus analyze`);
     } else {
       try {
+        // A retrieval call that can take two minutes is not retrieval. Measured
+        // in a live session: a broad question expanded 12 candidates against a
+        // cold engine and answered in 121 SECONDS — by which time the agent it
+        // was meant to save had long since grepped. The whole argument for this
+        // tool is that it beats reading files, so the structural stage gets a
+        // deadline and the answer goes out without it when the deadline passes.
+        const budget = Number(process.env.LENS_STRUCTURE_MS ?? 20_000);
+        const deadline = <T>(p: Promise<T>, what: string) => Promise.race([
+          p,
+          new Promise<T>((_, rej) =>
+            setTimeout(() => rej(new Error(`structural stage over ${(budget / 1000).toFixed(0)}s (${what})`)), budget)),
+        ]);
         // Location join first — one query, and it resolves chunks to the real
         // enclosing function. Name-based lookup is the fallback for candidates
         // that carry a symbol but no line.
-        hoods = await graph.expandByLocation(expandable.slice(0, 12), repo);
+        hoods = await deadline(graph.expandByLocation(expandable.slice(0, 12), repo), 'location join');
         // Name-based fallback ONLY for candidates with no line to join on.
         // Running it for line-carrying candidates meant every chunk the graph
         // has no Function for (test files, generated code) burned a lookup
         // timeout — 8.5 s of the 8.6 s response, for nothing.
         const unresolved = expandable.filter((c) => !c.startLine && c.symbol);
         if (unresolved.length) {
-          const byName = await graph.expand(unresolved.slice(0, 6), repo);
+          const byName = await deadline(graph.expand(unresolved.slice(0, 6), repo), 'name lookup');
           for (const c of unresolved) {
             const h = byName.get(c.symbol!);
             if (h) hoods.set(locKey(c), h);
           }
         }
       } catch (e) {
+        // Partial structure is still structure: whatever the location join
+        // returned before the deadline is kept, and the answer says what is
+        // missing rather than pretending it was never asked for.
         notes.push(`DEGRADED: no structural stage (${short(e)})`);
       }
     }
@@ -124,6 +150,12 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
 
   const stale = staleness(cwd);
   if (stale) notes.push(stale);
+  // Freshness on the READ path, after Graft: a question asked of a lagging index
+  // starts the repair, rather than waiting for a clock that has already lost the
+  // race. Never blocks this answer — it heals for the next one.
+  const behind = Number(/structure is (\d+) commits? behind/.exec(stale ?? '')?.[1] ?? 0);
+  const healing = healIfStale(cwd, behind);
+  if (healing) notes.push(healing);
 
   return {
     question: input.question,
@@ -164,6 +196,11 @@ export function staleness(cwd: string): string | undefined {
       ? `structure was indexed at ${indexed.slice(0, 9)}, which is no longer in this branch's history — it needs a rebuild`
       : `structure is ${behind} commit${behind === 1 ? '' : 's'} behind HEAD ` +
         `(indexed ${indexed.slice(0, 9)})` +
+        // Commits are not the whole truth. Graft measures freshness against
+        // working-tree BYTES, so an uncommitted edit is drift like any other —
+        // and a commit count is blind to exactly the file the reader is editing
+        // right now. Name those files: they are the ones the answer is wrong about.
+        driftNote(cwd, JSON.parse(readFileSync(join(cwd, '.gitnexus', 'meta.json'), 'utf8')).indexedAt) +
         // Never name a cadence as a promise. This read "refresh runs every
         // 15 min" while the timer was deferring this repo's rebuild by the
         // hour for cost — so the note reassured the reader with the one thing
@@ -171,6 +208,19 @@ export function staleness(cwd: string): string | undefined {
         // work is therefore invisible rather than absent.
         (behind > 20 ? ' — code written since is INVISIBLE here, not missing; grep is authoritative for it' : '');
   } catch { return undefined; }
+}
+
+/**
+ * The uncommitted half of staleness, as a clause to hang on the commit count.
+ * Silent when nothing moved, so a fresh tree adds no words.
+ */
+function driftNote(cwd: string, indexedAt: string | undefined): string {
+  if (!indexedAt) return '';
+  const files = workingTreeDrift(cwd, indexedAt);
+  if (!files.length) return '';
+  const shown = files.slice(0, 3).map((f) => basename(f)).join(', ');
+  return ` · ${files.length} file${files.length === 1 ? '' : 's'} edited since indexing` +
+    ` (${shown}${files.length > 3 ? ', …' : ''}) — structure there is from the older bytes`;
 }
 
 const short = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 90);

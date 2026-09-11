@@ -163,3 +163,33 @@ assert.equal(minGapMs(58_700), 587_000, 'the measured cost of this repo stays un
 assert.equal(minGapMs(121_000), 1_210_000, 'twice the cost buys twice the wait, not twenty times');
 assert.equal(minGapMs(3_600_000), 3_600_000, 'and nothing is ever deferred beyond an hour');
 assert.equal(minGapMs(), 0, 'a repo never measured is due now');
+
+
+// ── a lagging index heals because it was READ, not because a clock fired ────
+// The timer lost the race on a repo committing ~8 times an hour: measured
+// 19-43 commits behind at all times. Graft puts the rebuild inside the query
+// (trailhq/Graft, src/graph/refresh.ts); ours is far too slow to block an
+// answer, so the TRIGGER moves to the read path instead and the answer still
+// goes out immediately.
+{
+  const { healIfStale, resetHealState, HEAL_AT_COMMITS } = await import('../dist/core/heal.js');
+  const spawned = [];
+  const spawnFn = (bin, args, opts) => { spawned.push({ args, cwd: opts?.cwd }); return { on() {}, unref() {} }; };
+  const at = (mins) => () => Date.parse('2026-09-02T00:00:00Z') + mins * 60_000;
+
+  resetHealState();
+  assert.equal(healIfStale('/repo', HEAL_AT_COMMITS - 1, { now: at(0), spawnFn }), undefined,
+    'a nearly-current index is left alone');
+  assert.deepEqual(spawned, [], 'and costs no rebuild');
+
+  const note = healIfStale('/repo', 42, { now: at(0), spawnFn });
+  assert.match(String(note), /42 commits behind/, 'a lagging index says it is repairing itself');
+  assert.equal(spawned.length, 1, 'exactly one rebuild is started');
+  assert.ok(spawned[0].args.includes('--graph-only'),
+    'and only the cheap engine — an auto-rebuild must never spend the expensive one');
+
+  healIfStale('/repo', 99, { now: at(1), spawnFn });
+  assert.equal(spawned.length, 1, 'a second question a minute later does not queue a second pass');
+  healIfStale('/other', 99, { now: at(1), spawnFn });
+  assert.equal(spawned.length, 1, 'nor does a different repo while one is still in flight');
+}
