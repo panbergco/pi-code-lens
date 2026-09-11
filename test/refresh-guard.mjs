@@ -12,10 +12,10 @@
  */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectLayers, indexRunning, loadEngineEnv } from '../dist/commands/refresh.js';
+import { detectLayers, indexRunning, loadEngineEnv, saveState } from '../dist/commands/refresh.js';
 
 // ── every indexing pass must be recognised, including the vector one ─────────
 // These decoys look EXACTLY like a real indexing pass, because that is the
@@ -94,6 +94,16 @@ await detectLayers('repo', state, repo, 200);
 assert.equal(state.layersFor, '2026-08-29T02:30:00.000Z',
   'a rewritten index invalidates the cached layer answer');
 
+// A layer that was once there stays REQUESTED even when the probe finds nothing.
+// Observation alone made loss permanent: the control-flow layer was rebuilt by
+// hand twice on a large monorepo and deleted by the next refresh both times,
+// because the refresh asked the damaged index what it should contain.
+writeMeta('2026-08-29T03:00:00.000Z');
+const latched = { wantPdg: true };
+const layers = await detectLayers('repo', latched, repo, 200);   // engine unreachable → probes 0
+assert.equal(layers.pdg, true,
+  'a layer the index is meant to carry is re-requested even when the probe sees none');
+
 
 // ── one engine configuration, wherever a refresh is launched from ───────────
 // An interrupted vector pass leaves a checkpoint that records HOW the vectors
@@ -125,3 +135,19 @@ console.log('ok — no refresh starts on top of another pass, and no stale layer
 // the refresh command exits the process instead. Do the same rather than hang.
 reapDecoys();
 process.exit(0);
+
+
+// ── a pass may not revert what it never read ────────────────────────────────
+// State is read when a pass starts and written when it ends, minutes later.
+// Anything set in between used to vanish: `wantPdg`, set by hand to stop the
+// control-flow layer being deleted, was reverted by a pass already in flight,
+// and the layer was then rebuilt without it.
+{
+  const file = join(mkdtempSync(join(tmpdir(), 'lens-state-')), 'refresh-state.json');
+  writeFileSync(file, JSON.stringify({ alpha: { graphMs: 1, wantPdg: true }, beta: { graphMs: 2 } }));
+  saveState({ alpha: { graphMs: 99 } }, file);          // a pass that only ever saw alpha
+  const after = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(after.alpha.wantPdg, true, 'a field written mid-pass survives the pass that never read it');
+  assert.equal(after.alpha.graphMs, 99, 'the pass still records what it measured');
+  assert.equal(after.beta.graphMs, 2, 'a repo this pass never touched is left alone');
+}

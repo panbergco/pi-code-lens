@@ -163,7 +163,13 @@ export function staleness(cwd: string): string | undefined {
     return behind === undefined
       ? `structure was indexed at ${indexed.slice(0, 9)}, which is no longer in this branch's history — it needs a rebuild`
       : `structure is ${behind} commit${behind === 1 ? '' : 's'} behind HEAD ` +
-        `(indexed ${indexed.slice(0, 9)}) — refresh runs every 15 min`;
+        `(indexed ${indexed.slice(0, 9)})` +
+        // Never name a cadence as a promise. This read "refresh runs every
+        // 15 min" while the timer was deferring this repo's rebuild by the
+        // hour for cost — so the note reassured the reader with the one thing
+        // that was false. Say what is known: how far behind, and that recent
+        // work is therefore invisible rather than absent.
+        (behind > 20 ? ' — code written since is INVISIBLE here, not missing; grep is authoritative for it' : '');
   } catch { return undefined; }
 }
 

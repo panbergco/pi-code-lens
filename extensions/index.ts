@@ -655,6 +655,10 @@ export default function piCodeLens(pi: ExtensionAPI) {
   }
 
   /** One routed answer, bounded in both time and tokens. Failure is silence. */
+  /** Commits behind HEAD past which a structural claim is not worth making.
+   *  Roughly an hour of a busy repo's history. */
+  const MAX_BEHIND = 30;
+
   async function answerFor(subject: string, cwd: string, budgetMs = settings.timeoutMs, budgetTokens = settings.budgetTokens) {
     const key = subject.toLowerCase();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -680,6 +684,19 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const structural = result.spots.filter((s) =>
         s.signals.some((sig) => /caller|flow/i.test(sig)) || s.breaks.length > 0);
       if (!structural.length) { unanswerable.set(key, Date.now()); return undefined; }
+
+      // A caller list describes the commit it was built from. Far enough behind
+      // and it describes a different codebase — and this block arrives in
+      // someone else's turn wearing the same confident shape either way, which
+      // is worse than silence: they already have the grep output, so saying
+      // nothing costs them a fact, while saying something stale costs them a
+      // wrong one. Measured on a large monorepo: 19-43 commits behind at all
+      // times, because a 121s rebuild tripped the hourly cost deferral.
+      const behind = Number(/structure is (\d+) commits? behind/.exec(result.notes.join(' '))?.[1] ?? 0);
+      if (behind > MAX_BEHIND) {
+        trace("stale", subject, `${behind} commits behind — suppressed`);
+        return undefined;   // deliberately NOT memoised: the next refresh fixes it
+      }
 
       answered.set(key, Date.now());
       return { subject, body: render(structural, budgetTokens) };

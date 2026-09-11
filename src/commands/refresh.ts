@@ -40,6 +40,13 @@ export interface RepoState {
   /** The index this layer answer describes. Anyone may build a layer by hand;
    *  when they do, the index is rewritten and the cached answer is a lie. */
   layersFor?: string;
+  /** Layers this index is MEANT to carry, latched the first time one is seen.
+   *  Observation alone cannot decide: a refresh that probes a damaged index
+   *  finds no control-flow layer and faithfully rebuilds without one, so a
+   *  single loss becomes permanent and self-confirming. Measured on
+   *  a large monorepo: 99,518 basic blocks built by hand were gone by the next
+   *  cycle, twice. Intent is recorded, and only an operator lowers it. */
+  wantPdg?: boolean;
 }
 
 /**
@@ -65,12 +72,28 @@ function scopeHash(dir: string): string {
 }
 type State = Record<string, RepoState>;
 
-const loadState = (): State => {
-  try { return JSON.parse(readFileSync(STATE, 'utf8')); } catch { return {}; }
+const loadState = (file = STATE): State => {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return {}; }
 };
-const saveState = (s: State) => {
-  mkdirSync(dirname(STATE), { recursive: true });
-  writeFileSync(STATE, JSON.stringify(s, null, 2));
+/**
+ * Merge on write — never replace.
+ *
+ * A refresh reads this file at the start of a pass and writes it at the end,
+ * and a pass lasts minutes. Anything written in between — by an operator, by
+ * `/lens`, by a second repo's pass — was silently reverted by whoever finished
+ * last. Caught in the act: `wantPdg` was set by hand at 13:05 to stop the
+ * control-flow layer being deleted, and a pass that had started at 12:58 wrote
+ * it straight back out again, so the layer was rebuilt without it.
+ *
+ * Per-repo shallow merge, on-disk fields first: this pass only learned about
+ * the repos it touched, so it may not overrule what it never looked at.
+ */
+export const saveState = (s: State, file = STATE) => {
+  mkdirSync(dirname(file), { recursive: true });
+  const disk = loadState(file);
+  const merged: State = { ...disk };
+  for (const [repo, mine] of Object.entries(s)) merged[repo] = { ...disk[repo], ...mine };
+  writeFileSync(file, JSON.stringify(merged, null, 2));
 };
 
 /**
@@ -224,7 +247,10 @@ export async function detectLayers(
     } catch { return 0; }
   };
   const [pdg, emb] = await Promise.all([count('BasicBlock'), count('CodeEmbedding')]);
-  const layers = { pdg: pdg > 0, embeddings: emb > 0 };
+  // Latch upward only. Present now means wanted from now on, so the next
+  // rebuild re-requests the layer instead of reproducing its absence.
+  if (pdg > 0) st.wantPdg = true;
+  const layers = { pdg: pdg > 0 || st.wantPdg === true, embeddings: emb > 0 };
   st.layers = layers;
   st.layersFor = stamp;
   return layers;
