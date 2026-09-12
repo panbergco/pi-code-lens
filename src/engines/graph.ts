@@ -421,6 +421,42 @@ export class GraphEngine implements Engine {
   }
 
   /**
+   * Where does this symbol actually live?
+   *
+   * A bare-symbol question — which is what the automatic answers ask, every time
+   * — comes back with the symbol's NAME in the file field and no line at all.
+   * Everything that needs a real path silently did nothing: no crux could be
+   * lifted, and no saving could be measured, on the one path that carries almost
+   * every answer. Measured after shipping: 4 repo maps and 2 savings lines in an
+   * hour, and not one crux.
+   */
+  async locate(name: string, repo?: string): Promise<{ file: string; line?: number } | undefined> {
+    const safe = name.replace(/['\\]/g, '');
+    if (!safe || safe !== name) return undefined;
+    repo ??= (await this.repoArg(process.cwd())).repo;
+    try {
+      const r: any = GraphEngine.unwrap(await this.rpc('tools/call', {
+        name: 'cypher',
+        arguments: {
+          // Prefer SOURCE over build output. Asked without this, `parseRoadmap`
+          // resolved to release/status-worker-main.js — a bundle where the
+          // symbol exists but nobody edits it, so the lifted lines describe
+          // code the reader cannot change.
+          query: `MATCH (n) WHERE n.name = '${safe}' AND n.filePath IS NOT NULL ` +
+                 'RETURN n.filePath AS file, n.startLine AS line ' +
+                 "ORDER BY CASE WHEN n.filePath CONTAINS '/src/' THEN 0 ELSE 1 END, " +
+                 "CASE WHEN n.filePath CONTAINS 'release/' OR n.filePath CONTAINS 'dist/' THEN 1 ELSE 0 END LIMIT 1",
+          ...(repo ? { repo } : {}),
+        },
+      }, 6_000));
+      const row = String(r?.markdown ?? '').split('\n')[2];
+      if (!row) return undefined;
+      const [file, line] = row.split('|').map((c) => c.trim()).filter(Boolean);
+      return file ? { file, line: Number(line) || undefined } : undefined;
+    } catch { return undefined; }
+  }
+
+  /**
    * The shape of the repository in one glance: its busiest symbols.
    *
    * Orientation at session start is the one thing a cold agent cannot get from

@@ -50,8 +50,12 @@ try {
   assert.ok(base.chars > 0);
 
   const small = savingsLine('3 callers', [file], dir);
-  assert.match(small, /tokens saved/, 'a block far smaller than the file it replaces says what it saved');
-  assert.match(small, new RegExp(`${toTokens(base.chars)}`.slice(0, 2)), 'against the real file size');
+  // The line states a COMPARISON, not a percentage: "~5,997 tokens saved (100%)"
+  // for a three-token block is technically true, reads as a boast, and drags
+  // down the honest numbers printed beside it.
+  assert.match(small, /this block ≈\d+ tok; opening the file it points at ≈\d+ tok/,
+    'both figures are given, and no claim is made about what the reader would have done');
+  assert.ok(!/%/.test(small), 'no percentage, because the denominator is a guess about behaviour');
 
   assert.equal(savingsLine('x'.repeat(100_000), [file], dir), undefined,
     'a block bigger than the source saved nothing, and says nothing');
@@ -60,8 +64,9 @@ try {
   // arithmetic nobody believes, which discredits the honest numbers beside it.
   writeFileSync(join(dir, 'src/huge.ts'), 'x'.repeat(500_000));
   const capped = savingsLine('3 callers', ['src/huge.ts'], dir);
-  assert.ok(toTokens(MAX_FILE_CHARS) >= Number(/~([\d,]+) tokens saved/.exec(capped)[1].replace(/,/g, '')),
-    'one enormous file cannot inflate the claim beyond a plausible read');
+  const claimed = Number(/≈([\d,]+) tok\.$/.exec(capped)[1].replace(/,/g, ''));
+  assert.ok(claimed <= toTokens(MAX_FILE_CHARS),
+    'one enormous file cannot inflate the comparison beyond a plausible read');
 
   assert.equal(savingsLine('3 callers', ['src/gone.ts'], dir), undefined,
     'an unmeasurable baseline is omitted, never invented');

@@ -63,7 +63,10 @@ export function savingsLine(body: string, files: Iterable<string>, cwd = process
   const packTokens = toTokens(body.length);
   const saved = baseTokens - packTokens;
   if (saved <= 0) return undefined;
-  const pct = Math.round((saved / baseTokens) * 100);
-  return `[code-lens] ~${saved.toLocaleString()} tokens saved (${pct}%): this block is ~${packTokens.toLocaleString()} tok ` +
-         `against ~${baseTokens.toLocaleString()} for opening ${base.files} file${base.files === 1 ? '' : 's'} whole.`;
+  // State the COMPARISON, not a percentage. "~5,997 tokens saved (100%)" for a
+  // three-token block is arithmetic that is technically true and reads as a
+  // boast — and a number nobody believes drags down the honest ones printed
+  // beside it. Two figures, no claim about what the reader would have done.
+  return `[code-lens] this block ≈${packTokens.toLocaleString()} tok; opening the ` +
+         `${base.files === 1 ? 'file' : `${base.files} files`} it points at ≈${baseTokens.toLocaleString()} tok.`;
 }

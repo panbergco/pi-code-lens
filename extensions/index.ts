@@ -914,11 +914,21 @@ export default function piCodeLens(pi: ExtensionAPI) {
       answered.set(key, Date.now());
       // Carry the lines that do the work, not just the address. A pointer makes
       // the agent open the file; the crux often means it never has to.
+      //
+      // A bare-symbol question — which is what this path always asks — answers
+      // with the SYMBOL in the file field and no line, so the crux and the
+      // savings line both silently did nothing until the location was looked up.
       const top = structural[0]!;
-      const lifted = crux(top.file, top.line, cwd);
+      let file = top.file, line = top.line;
+      if (!line || !file.includes("/")) {
+        const at = await new GraphEngine().locate(top.symbol ?? subject);
+        if (at) { file = at.file; line = at.line; }
+      }
+      const lifted = crux(file, line, cwd);
       const body = render(structural, budgetTokens) +
-        (lifted ? `\n\n${top.file}:${top.line}\n\`\`\`\n${lifted}\n\`\`\`` : '');
-      return { subject, body, files: structural.map((s) => s.file) };
+        (lifted ? `\n\n${file}:${line}\n\`\`\`\n${lifted}\n\`\`\`` : "");
+      const files = [file, ...structural.map((s) => s.file)].filter((f) => f.includes("/"));
+      return { subject, body, files };
     } catch (e) {
       trace("failed", subject, String((e as Error)?.message ?? e).slice(0, 120));
       unanswerable.set(key, Date.now());   // an engine that failed once will fail again this turn
