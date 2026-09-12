@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
-import { subjectsForSearch } from "../src/core/augment.js";
+import { foundNothing, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
 import { askViaServer, serverUp } from "../src/server/client.js";
@@ -631,8 +631,47 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const cmd = String((event.input as { command?: string })?.command ?? "");
       if (GIT_MUTATION_RE.test(cmd)) scheduleRefresh(ctx, "git history moved");
     }
+    const radius = await blastRadius(event, ctx);
+    if (radius) return radius;
     return await enrichSearch(event, ctx);
   });
+
+  /**
+   * A symbol was just changed — say who depends on it, unasked.
+   *
+   * The weakest surface by measurement: on a large monorepo only 10% of edits to
+   * an indexed symbol had its blast radius pulled first, because nothing ever
+   * offered it. `tool_call` can only BLOCK a tool, and blocking an edit to teach
+   * someone about callers is a worse trade than being slightly late — so this
+   * speaks straight after the write, while the change is still the thing being
+   * worked on and a sibling caller can still be fixed in the same breath.
+   * (Same placement as Graft's post-edit hook, trailhq/Graft src/claude/hooks.ts.)
+   *
+   * Silent unless the graph actually knows dependents, and once per file per
+   * repeat window — an edit loop must not narrate the same callers every save.
+   */
+  async function blastRadius(event: any, ctx: ExtensionContext): Promise<{ content: unknown[] } | undefined> {
+    if (!settings.augment || event.isError) return;
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
+    const path = String((event.input as { path?: string })?.path ?? "");
+    // Same rule as a search subject: a code file, and a name worth asking about.
+    const symbol = symbolFromPath(path);
+    if (!symbol) return;
+    if (freshness(ctx.cwd).state === "unindexed") return;
+    if (recall().answered.has(symbol.toLowerCase())) return;
+    const answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
+    if (!answer) return;
+    augmentHits++;
+    trace("blast radius", symbol);
+    return {
+      content: [...(event.content ?? []), {
+        type: "text" as const,
+        text: `\n\n---\n[code-lens — you just changed "${answer.subject}"; this depends on it]\n` +
+              `${answer.body}\nCheck the callers above before moving on — patching one file and ` +
+              `leaving its siblings is the classic miss.\n---`,
+      }],
+    };
+  }
 
   /** Why a search was or was not answered. Set LENS_AUGMENT_DEBUG to a path.
    *  Silence is this feature's normal state, so it must be explainable. */
@@ -644,12 +683,19 @@ export default function piCodeLens(pi: ExtensionAPI) {
 
   /** Answer the search the agent just ran, or say nothing at all. */
   async function enrichSearch(event: any, ctx: ExtensionContext): Promise<{ content: unknown[] } | undefined> {
-    if (!settings.augment || event.isError) return;
-    if (!Array.isArray(event.content) || !event.content.length) return;
+    if (!settings.augment) return;
+    if (!Array.isArray(event.content)) return;
     if (freshness(ctx.cwd).state === "unindexed") return;  // nothing to answer with
 
     const input = (event.input ?? {}) as Record<string, unknown>;
     const text = event.content.map((c: { text?: string }) => c.text ?? "").join("\n");
+    // A search that found NOTHING is the moment this index is worth most: the
+    // agent has learned nothing and is about to search again, usually with a
+    // reworded pattern. Skipping errors and short output cost 2,933 of these in
+    // 24 hours on one repo. A broken shell still gets silence — that is a fact
+    // about the command, not about the code.
+    const empty = foundNothing(text, Boolean(event.isError));
+    if (event.isError && !empty) return;   // the command itself failed
     const subjects = subjectsForSearch(event.toolName, input, text,
       recall(), settings.maxSubjects);
     if (!subjects.length) return;
@@ -682,8 +728,13 @@ export default function piCodeLens(pi: ExtensionAPI) {
 
     augmentHits++;
     trace("appended", found.map((f) => f.subject).join(","), `${settings.budgetTokens - left} tok`);
+    // Two different facts, two different headings. "Your search found nothing,
+    // here is where it lives" is worth more than the same block phrased as a
+    // footnote, and it tells the agent not to reword the pattern and try again.
     const body = found
-      .map((f) => `[code-lens — what the index knows about "${f.subject}"]\n${f.body}`)
+      .map((f) => (empty
+        ? `[code-lens — that search found nothing; the index has "${f.subject}"]\n${f.body}`
+        : `[code-lens — what the index knows about "${f.subject}"]\n${f.body}`))
       .join("\n\n");
     return {
       content: [...event.content, { type: "text" as const, text: `\n\n---\n${body}\n---` }],

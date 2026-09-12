@@ -110,8 +110,21 @@ assert.ok((await run({ input: { command: 'grep -rn parseHeader src' } })) !== un
 reset();
 assert.equal(await run({ input: { command: 'lens ask "where is writeLane"' } }), undefined);
 assert.equal(await run({ toolName: 'edit', input: { path: 'a.ts' } }), undefined, 'and does not touch edits');
-assert.equal(await run({ isError: true, input: { command: 'grep -rn missingSymbol src' } }), undefined,
-  'a failed search is not a question');
+// REVERSED, deliberately: a search that found nothing is the loudest question a
+// search can ask, and skipping those cost 2,933 openings in 24 hours on one repo.
+// The block says so in its own words, so the agent stops rewording the pattern.
+{
+  const empty = await run({ isError: true, content: [{ type: 'text', text: '' }],
+                            input: { command: 'grep -rn writeLane src' } });
+  assert.match(textOf(empty), /that search found nothing; the index has "writeLane"/,
+    'an empty search is answered, and told it was empty');
+
+  // A broken shell is still silence: that is a fact about the command.
+  reset();
+  assert.equal(await run({ isError: true, content: [{ type: 'text', text: 'bash: rg: command not found' }],
+                          input: { command: 'rg -n parseHeader src' } }), undefined,
+    'a command that never ran asks the index nothing');
+}
 assert.deepEqual(calls, [], 'none of those reached an engine');
 
 // ── an unindexed directory is not interrogated ─────────────────────────────
@@ -186,3 +199,37 @@ console.log('ok — the hook appends, remembers, obeys its toggle, and never hol
 console.log('ok — the prompt is answered before the agent acts, once per spot, twice at most when weak');
 
 rmSync(repo, { recursive: true, force: true });
+
+
+// ── changing a symbol brings its dependents with it ─────────────────────────
+// The weakest surface measured: only 10% of edits to an indexed symbol had its
+// blast radius pulled first, because nothing ever offered one. pi's tool_call
+// hook can only BLOCK a tool, and blocking an edit to teach someone about
+// callers is a worse trade than speaking straight after the write.
+{
+  mkdirSync(join(repo, '.gitnexus'), { recursive: true });
+  writeFileSync(join(repo, '.gitnexus', 'meta.json'),
+    JSON.stringify({ lastCommit: 'a'.repeat(40), indexedAt: new Date().toISOString() }));
+  reset();
+  const edit = (path, over = {}) => handlers.tool_result({
+    toolName: 'edit', input: { path }, content: [{ type: 'text', text: 'ok' }], isError: false, ...over,
+  }, ctx);
+
+  const out = await edit('/repo/packages/core/src/writeLane.ts');
+  assert.match(textOf(out), /you just changed "writeLane"; this depends on it/,
+    'an edited symbol is met with who depends on it');
+  assert.match(textOf(out), /3 callers/, 'and the dependents are real structure');
+
+  // Repetition is governed by the same repeat window as every other answer, and
+  // this fixture sets it to 0 so the memory expires instantly — so here the
+  // second save speaks again, and that is the configured behaviour, not a leak.
+  // At the shipped default (30 min) an edit loop stays quiet after the first.
+  assert.notEqual(await edit('/repo/packages/core/src/writeLane.ts'), undefined,
+    'with no repeat window, a later save is answered again');
+
+  assert.equal(await edit('/repo/docs/notes.md'), undefined, 'a non-code file has no blast radius');
+  assert.equal(await edit('/repo/packages/core/src/store.ts', { isError: true }), undefined,
+    'a failed edit changed nothing, so it breaks nothing');
+}
+
+console.log('ok — an edited symbol arrives with its dependents, once');

@@ -58,8 +58,14 @@ const grepOut = 'packages/core/src/write-lane.ts:886:  const owner = lanes.find(
 
 assert.deepEqual(subjectsForSearch('edit', { path: 'a.ts' }, grepOut, memory()), [],
   'only search-shaped tools are answered');
-assert.deepEqual(subjectsForSearch('bash', { command: 'grep -rn cmdMaintenance src' }, 'x', memory()), [],
-  'a search that found nothing asks nothing');
+// REVERSED, deliberately. This used to assert that an empty result asks no
+// question. Measured on a large monorepo: 2,933 searches in 24 hours returned
+// empty or non-zero — 18% of every code search — and they are the ones where
+// the agent learned nothing and rewords the pattern rather than asking the
+// index. An empty result is the loudest question a search can ask.
+assert.deepEqual(subjectsForSearch('bash', { command: 'grep -rn cmdMaintenance src' }, 'x', memory()),
+  ['cmdMaintenance'],
+  'a search that found nothing is exactly when the index should speak');
 assert.deepEqual(subjectsForSearch('bash', { command: 'lens ask "where is x"' }, grepOut, memory()), [],
   'the lens must never answer itself');
 
@@ -76,3 +82,30 @@ assert.deepEqual(subjectsForSearch('read', { path: 'packages/core/src/tick.ts' }
   'reading a file asks about that file, not about where a search landed');
 
 console.log('ok — a search is answered only when there is a real subject and something new to say');
+
+
+// ── a search that found NOTHING is the best moment to speak ─────────────────
+// Errors and short output used to be skipped outright. Measured on
+// a large monorepo: 2,933 searches in 24 hours came back empty or non-zero — 18%
+// of every code search — and those are exactly the ones where the agent learned
+// nothing and is about to reword the pattern and try again.
+{
+  const { foundNothing, subjectsForSearch } = await import('../dist/core/augment.js');
+  const fresh = () => ({ answered: new Set(), unanswerable: new Set() });
+
+  assert.equal(foundNothing('', true), true, 'grep exiting 1 with no output found nothing');
+  assert.equal(foundNothing('  \n ', false), true, 'blank output found nothing');
+  assert.equal(foundNothing('bash: rg: command not found', true), false,
+    'a missing binary is a fact about the command, not about the code');
+  assert.equal(foundNothing('grep: packages/nope.ts: No such file or directory', true), false,
+    'a bad path is the shell failing, and the index has nothing to add');
+  assert.equal(foundNothing('src/lane.ts:88:export function writeLane() {\nsrc/b.ts:2: writeLane()'), false,
+    'a search that found something did not find nothing');
+
+  assert.deepEqual(
+    subjectsForSearch('bash', { command: 'grep -rn "claimSlice" packages/core/src' }, '', fresh()),
+    ['claimSlice'], 'an empty result still asks its question');
+  assert.deepEqual(
+    subjectsForSearch('bash', { command: 'grep -rn "claimSlice" packages' }, 'bash: grep: command not found', fresh()),
+    [], 'a broken shell still gets silence');
+}

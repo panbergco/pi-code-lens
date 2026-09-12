@@ -55,6 +55,11 @@ export interface Kpi {
   byAnswer: number;
   byTool: number;
   nudged: number;
+  /** Moments left unanswered ON PURPOSE, because the same subject was answered
+   *  minutes earlier and is still in the reader's context. Counting these as
+   *  failures measures the memory doing its job: on a large monorepo they were
+   *  54.7% of all misses. */
+  recentlyTold: number;
   misses: Array<[string, number]>;
   sessions: number;
 }
@@ -90,7 +95,7 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
       prompt: { happened: 0, addressable: 0, served: 0 },
       edit: { happened: 0, addressable: 0, served: 0 },
     },
-    byAnswer: 0, byTool: 0, nudged: 0, misses: [], sessions: 0,
+    byAnswer: 0, byTool: 0, nudged: 0, recentlyTold: 0, misses: [], sessions: 0,
   };
   const missed = new Map<string, number>();
 
@@ -136,13 +141,20 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
         }
       } else if (m?.role === 'toolResult') {
         const txt = (m.content ?? []).map((c: any) => c?.text ?? '').join('');
-        const hit = /what the index knows about "([^"]+)"/.exec(txt);
-        if (hit) ev.push({ t, kind: 'answer', subject: hit[1] });
+        // Every shape the index speaks in: on a search, on an empty search, and
+        // on an edit. A channel the KPI cannot see reads as a channel that does
+        // not work — which is how the prompt pack showed up as zero for a day.
+        const hit = /what the index knows about "([^"]+)"|that search found nothing; the index has "([^"]+)"/.exec(txt);
+        if (hit) ev.push({ t, kind: 'answer', subject: hit[1] ?? hit[2] });
+        const radius = /you just changed "([^"]+)"; this depends on it/.exec(txt);
+        if (radius) ev.push({ t, kind: 'radius', subject: radius[1] });
       }
     }
 
+    const told = new Map<string, number>();
     for (let i = 0; i < ev.length; i++) {
       const e = ev[i]!;
+      if (e.kind === 'answer' || e.kind === 'radius') told.set(String(e.subject).toLowerCase(), e.t);
       if (e.kind === 'search' && e.subject) {
         K.moments.search.happened++;
         if (!known.has(e.subject.toLowerCase())) continue;
@@ -150,6 +162,7 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
         const after = ev.slice(i + 1, i + 4);
         if (after.some((x) => x.kind === 'answer' && x.subject === e.subject)) { K.moments.search.served++; K.byAnswer++; }
         else if (after.some((x) => x.kind === 'lens' && x.subject?.includes(e.subject!.toLowerCase()))) { K.moments.search.served++; K.byTool++; }
+        else if (told.has(e.subject.toLowerCase()) && e.t - told.get(e.subject.toLowerCase())! < 30 * 60_000) K.recentlyTold++;
         else missed.set(e.subject, (missed.get(e.subject) ?? 0) + 1);
       }
       if (e.kind === 'prompt' && (e.text?.length ?? 0) >= 12) {
@@ -171,8 +184,13 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
         if (!known.has(sym.toLowerCase())) continue;
         K.moments.edit.addressable++;
         const before = ev.slice(Math.max(0, i - 8), i);
+        const after = ev.slice(i + 1, i + 3);
+        // Pulled first, or handed over straight after the write — both leave the
+        // agent holding the callers while the change is still the thing being
+        // worked on, which is what the moment is for.
         if (before.some((x) => (x.kind === 'lens' && x.subject?.includes(sym.toLowerCase())) ||
-                               (x.kind === 'answer' && x.subject?.toLowerCase() === sym.toLowerCase())))
+                               (x.kind === 'answer' && x.subject?.toLowerCase() === sym.toLowerCase())) ||
+            after.some((x) => x.kind === 'radius' && x.subject?.toLowerCase() === sym.toLowerCase()))
           K.moments.edit.served++;
       }
     }
@@ -202,6 +220,9 @@ function render(K: Kpi, hours: number): void {
   console.log(`  answered up front, from the prompt:      ${K.moments.prompt.served}`);
   console.log(`  because an agent chose a lens tool:      ${K.byTool}`);
   if (K.nudged) console.log(`  prompts nudged instead of answered:      ${K.nudged}`);
+  if (K.recentlyTold)
+    console.log(`  held back — same answer given <30 min ago:  ${K.recentlyTold}` +
+                `  (counted as a miss above; the memory working, not a gap)`);
   if (K.misses.length)
     console.log(`  known but never spoken about: ${K.misses.map(([s, n]) => `${s}×${n}`).join(', ')}`);
   console.log('\n  This number belongs to THIS checkout. It moves with what its agents do all');
