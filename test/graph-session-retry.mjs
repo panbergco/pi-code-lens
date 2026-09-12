@@ -55,3 +55,38 @@ assert.equal(sessions, DEAD_WORDINGS.length * 2, 'each dead session id is replac
 
 server.close();
 console.log('ok — graph engine recovers from an expired session');
+
+
+// ── a command hands its session back ────────────────────────────────────────
+// The engine holds a live server per session and caps at 1,000 with a 30-minute
+// idle sweep. A client that never says goodbye leaks one per invocation: a few
+// hundred queries in a loop exhausted the pool, and from then on every call
+// answered "no index" against a healthy index — the failure looked like missing
+// data and was actually bad manners.
+{
+  let deletes = 0;
+  const srv = http.createServer((req, res) => {
+    if (req.method === 'DELETE') { deletes++; res.statusCode = 200; return res.end('{}'); }
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const msg = JSON.parse(body || '{}');
+      if (msg.method === 'initialize') {
+        res.setHeader('mcp-session-id', 'only-one');
+        return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { ok: true } }));
+      }
+      if (msg.method === 'notifications/initialized') return res.end('{}');
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const e = new GraphEngine(`http://127.0.0.1:${srv.address().port}/mcp`);
+  await e.capabilities();
+  await GraphEngine.closeAll();
+  assert.equal(deletes, 1, 'the session is handed back when the process is done with it');
+  await GraphEngine.closeAll();
+  assert.equal(deletes, 1, 'and never handed back twice');
+  srv.close();
+}
+
+console.log('ok — sessions are returned, so a loop of queries cannot exhaust the engine');

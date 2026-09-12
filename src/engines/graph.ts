@@ -14,7 +14,42 @@ interface RpcResult { result?: any; error?: { message?: string } }
 export class GraphEngine implements Engine {
   readonly id = 'graph' as const;
   private session: string | null = null;
-  constructor(private url: string = DEFAULT_URL) {}
+  /** Every engine that has opened a session in this process, so a short-lived
+   *  command can hand them all back on the way out without each call site
+   *  having to remember. */
+  private static live = new Set<GraphEngine>();
+  constructor(private url: string = DEFAULT_URL) { GraphEngine.live.add(this); }
+
+  /** Close every session opened in this process. Called once, at exit. */
+  static async closeAll(): Promise<void> {
+    await Promise.all([...GraphEngine.live].map((e) => e.close()));
+    GraphEngine.live.clear();
+  }
+
+  /**
+   * Hand the session back. Every `lens` invocation opens one, the engine holds
+   * a live Server + Transport per session, and it caps at 1,000 with a 30-minute
+   * idle sweep — so a client that never says goodbye is a slow leak that a busy
+   * hour turns into an outage. Measured: a batch of KPI queries exhausted the
+   * pool, after which every initialize got "Server at session capacity" and every
+   * call reported no index, against an index that was perfectly healthy.
+   *
+   * Best-effort by design: this runs on the way out, and a failed goodbye must
+   * never fail the work that already succeeded. The idle sweep is the backstop.
+   */
+  async close(): Promise<void> {
+    const id = this.session;
+    GraphEngine.live.delete(this);
+    if (!id) return;
+    this.session = null;
+    try {
+      await fetch(this.url, {
+        method: 'DELETE',
+        headers: this.headers(),
+        signal: AbortSignal.timeout(2_000),
+      });
+    } catch { /* the sweep will reclaim it */ }
+  }
 
   /** MCP Streamable HTTP returns either JSON or an SSE frame; accept both. */
   private static parse(body: string): RpcResult {
