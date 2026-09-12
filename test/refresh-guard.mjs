@@ -53,7 +53,15 @@ for (const [title, expected] of [
   ['/usr/bin/gitnexus embeddings sync .', 'graph vector'],
   ['/usr/bin/ccc index --path /tmp', 'semantic'],
 ]) {
-  if (!quiet) continue;
+  // Re-check quietness for EVERY case, not once at the top. A real pass can
+  // start mid-loop — and since a lagging index now rebuilds because someone
+  // asked it a question, that is common rather than rare. When it happened, the
+  // real `gitnexus analyze` was found before the decoy and the vector case read
+  // as 'graph': a true answer about the wrong process, failing a correct test.
+  if (!settle(true)) {
+    console.log(`note: a real pass started — skipping the "${expected}" case`);
+    continue;
+  }
   const pid = sleeper(title);
   try {
     settle(false);   // wait for it to appear in the process table
