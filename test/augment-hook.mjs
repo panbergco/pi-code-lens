@@ -187,8 +187,12 @@ console.log('ok — the hook appends, remembers, obeys its toggle, and never hol
   const a = await start('please refactor the entire billing subsystem now');
   const b = await start('now do the same for the reporting subsystem too');
   const c = await start('and then the notifications subsystem as well');
-  assert.ok(/no strong structural match/.test(packOf(a)), 'a weak match says so, once');
-  assert.ok(/no strong structural match/.test(packOf(b)), 'and twice');
+  // The nudge must carry the CALL, not just the news: a bare "no match" is an
+  // apology, and Graft rewrote the same line after tracing a session where it
+  // left the agent to grep 38 times.
+  assert.ok(/nothing strong matched/.test(packOf(a)), 'a weak match says so, once');
+  assert.match(packOf(a), /lens_ask \{ question: "please refactor/, 'and names the exact call to make');
+  assert.ok(/nothing strong matched/.test(packOf(b)), 'and twice');
   assert.equal(c?.message, undefined, 'but never becomes wallpaper');
 
   // The directive still rides along, with its call discipline.

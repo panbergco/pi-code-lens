@@ -389,6 +389,63 @@ export class GraphEngine implements Engine {
     } catch { return undefined; }
   }
 
+  /**
+   * Who imports this FILE?
+   *
+   * A large share of what agents search for names a file, not a function —
+   * `actuator`, `file-lock`, `lane-bar` — and the caller graph has nothing to
+   * say about a module, so those searches met silence from an index that knew
+   * the answer in a different shape. Graft covers the same need with a file-level
+   * API view (`graft_file_api`); here the graph already carries 1,671 IMPORTS
+   * edges and nobody was asking it.
+   */
+  async importersOf(fileStem: string, repo?: string, limit = 6): Promise<string[]> {
+    const safe = fileStem.replace(/['\\]/g, '');
+    if (!safe || safe !== fileStem) return [];
+    // An unnamed repo is not "all repos": the engine answers about nothing and
+    // returns an empty table, which reads exactly like "the graph does not know"
+    // — caught live, with both new queries silently answering zero.
+    repo ??= (await this.repoArg(process.cwd())).repo;
+    try {
+      const r: any = GraphEngine.unwrap(await this.rpc('tools/call', {
+        name: 'cypher',
+        arguments: {
+          query: `MATCH (a)-[r:CodeRelation]->(b) WHERE r.type = 'IMPORTS' AND b.name STARTS WITH '${safe}.' ` +
+                 `RETURN DISTINCT a.filePath AS importer LIMIT ${limit}`,
+          ...(repo ? { repo } : {}),
+        },
+      }, 8_000));
+      return String(r?.markdown ?? '').split('\n').slice(2)
+        .map((l) => l.replace(/\|/g, '').trim()).filter(Boolean);
+    } catch { return []; }
+  }
+
+  /**
+   * The shape of the repository in one glance: its busiest symbols.
+   *
+   * Orientation at session start is the one thing a cold agent cannot get from
+   * any search — it does not yet know what to search for. Graft ships an
+   * INDEX.md repo map on every SessionStart for exactly this reason
+   * (`src/claude/hooks.ts`); this is the cheap structural equivalent.
+   */
+  async hubs(repo?: string, limit = 8): Promise<Array<{ name: string; callers: number }>> {
+    repo ??= (await this.repoArg(process.cwd())).repo;   // see importersOf
+    try {
+      const r: any = GraphEngine.unwrap(await this.rpc('tools/call', {
+        name: 'cypher',
+        arguments: {
+          query: "MATCH (x)-[r:CodeRelation]->(n) WHERE r.type = 'CALLS' AND n.name IS NOT NULL " +
+                 `RETURN n.name AS name, count(x) AS callers ORDER BY callers DESC LIMIT ${limit}`,
+          ...(repo ? { repo } : {}),
+        },
+      }, 8_000));
+      return String(r?.markdown ?? '').split('\n').slice(2).map((l) => {
+        const [name, callers] = l.split('|').map((c) => c.trim()).filter(Boolean);
+        return name && callers ? { name, callers: Number(callers) || 0 } : null;
+      }).filter(Boolean) as Array<{ name: string; callers: number }>;
+    } catch { return []; }
+  }
+
   static pickCandidate(candidates: any[]): any | undefined {
     const callable = new Set(['Function', 'Method', 'Class', 'Constructor', 'Interface']);
     const rank = (c: any) => {

@@ -44,10 +44,13 @@ import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
 import { foundNothing, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
+import { crux } from "../src/core/crux.js";
+import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
 import { askViaServer, serverUp } from "../src/server/client.js";
 import { refresh } from "../src/commands/refresh.js";
+import { GraphEngine } from "../src/engines/graph.js";
 import { doctor } from "../src/commands/doctor.js";
 import { kpi } from "../src/commands/kpi.js";
 
@@ -250,6 +253,17 @@ const estimateTokens = (text: string) => Math.ceil(text.length / 4);
  * stay useful, slowly enough not to repeat itself in the same stretch of work.
  */
 const DEAD_END_TTL_MS = 10 * 60_000; // the index changes; a miss is not permanent
+/**
+ * A TIMEOUT is not a dead end.
+ *
+ * Both were filed in the same drawer, so one slow answer — a cold engine, a
+ * rebuild in flight, a busy minute — muted that subject for ten minutes, long
+ * after the index could have answered it instantly. Measured on a large monorepo:
+ * 9.7% of all missed moments were subjects the index knew, asked again after a
+ * single earlier failure, and met with silence. A transient failure earns a
+ * pause, not a sentence.
+ */
+const SLOW_RETRY_MS = 45_000;
 const answered = new Map<string, number>();
 const unanswerable = new Map<string, number>();
 
@@ -597,6 +611,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // assumed a skipped pack was recoverable because "the agent pulls", traced a
     // session, and found it grepped 38 times instead.
     const pack = await promptPack(event.prompt, ctx.cwd);
+    const map = await repoMap(ctx.cwd);
 
     const announced = ANNOUNCED_BY_PI.test(event.systemPrompt) || event.systemPrompt.includes(RULES_HEADING);
     const result: { systemPrompt?: string; message?: any } = {};
@@ -613,10 +628,15 @@ export default function piCodeLens(pi: ExtensionAPI) {
         "Do not re-ask the same question reworded — switch tool or switch to reading the file.\n" +
         "- Load the pi-code-lens skill for the full sequence.";
     }
-    if (pack) {
+    // Orientation rides with the first pack of the session rather than as its own
+    // message: a cold agent cannot search for what it does not know exists, and
+    // this is the one thing no search can produce. Graft ships INDEX.md on every
+    // SessionStart for the same reason (trailhq/Graft, src/claude/hooks.ts).
+    const content = [map, pack].filter(Boolean).join("\n\n");
+    if (content) {
       result.message = {
         customType: "code-lens-context",
-        content: pack,
+        content,
         display: false,   // the model needs it; the human already has their own screen
       };
     }
@@ -736,8 +756,15 @@ export default function piCodeLens(pi: ExtensionAPI) {
         ? `[code-lens — that search found nothing; the index has "${f.subject}"]\n${f.body}`
         : `[code-lens — what the index knows about "${f.subject}"]\n${f.body}`))
       .join("\n\n");
+    // What this saved, measured against opening those files whole. It makes the
+    // value visible at the moment of delivery instead of reconstructing it from
+    // transcripts days later — which is how adoption stayed invisible for weeks.
+    const saved = savingsLine(body, found.flatMap((f) => f.files ?? []), ctx.cwd);
     return {
-      content: [...event.content, { type: "text" as const, text: `\n\n---\n${body}\n---` }],
+      content: [...event.content, {
+        type: "text" as const,
+        text: `\n\n---\n${body}${saved ? `\n${saved}` : ""}\n---`,
+      }],
     };
   }
 
@@ -769,6 +796,22 @@ export default function piCodeLens(pi: ExtensionAPI) {
    * full-price input on every turn, while what the agent pulls itself is paid
    * for once, when it is actually wanted (Graft, format.ts:108-114).
    */
+  /** Sent once per session: what this repository's busiest code is. */
+  let mapSent = false;
+  async function repoMap(cwd: string): Promise<string | undefined> {
+    if (mapSent || !settings.augment) return undefined;
+    mapSent = true;   // set before the await: one attempt per session, success or not
+    if (freshness(cwd).state === "unindexed") return undefined;
+    try {
+      const hubs = await new GraphEngine().hubs(undefined, 8);
+      if (!hubs.length) return undefined;
+      trace("repo map", hubs.length);
+      return `[code-lens — where the weight sits in ${cwd.split("/").pop()}]\n` +
+        hubs.map((h) => `  ${h.name} — ${h.callers} callers`).join("\n") +
+        `\nAsk lens_ask for anything you cannot place; lens_breaks before changing one of these.`;
+    } catch { return undefined; }
+  }
+
   async function promptPack(prompt: string, cwd: string): Promise<string | undefined> {
     if (!settings.augment) { trace("prompt: augment off"); return undefined; }
     const q = (prompt ?? "").trim();
@@ -783,8 +826,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
         // the one useful thing, twice per session, then stop.
         if (nudges >= NUDGE_CAP) return undefined;
         nudges++;
-        return `[code-lens] no strong structural match for this prompt — the index holds more than ` +
-               `this probe found. Try lens_ask "<your task>" before grepping.`;
+        // Name the call, not the news. Graft rewrote the same line after tracing
+        // a session where a bare "no match" left the agent to grep 38 times:
+        // a nudge that does not carry the command is just an apology.
+        const asking = q.length > 90 ? `${q.slice(0, 90)}…` : q;
+        return `[code-lens] nothing strong matched this prompt automatically — the index holds more ` +
+               `than that probe found. Before grepping, run:\n` +
+               `  lens_ask { question: "${asking.replace(/"/g, "'")}" }\n` +
+               `and lens_breaks on any symbol you are about to change.`;
       }
       // Novelty: a spot already shown this session is not news, and re-injecting
       // it spends the reader's context to tell them something they have.
@@ -814,7 +863,13 @@ export default function piCodeLens(pi: ExtensionAPI) {
         (async () => (await askViaServer(input)) ?? (await ask(input, getEngines(cwd))))(),
         new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(500, budgetMs)); }),
       ]);
-      if (!result) { trace("timeout/none", subject); unanswerable.set(key, Date.now()); return undefined; }
+      if (!result) {
+        // Park it briefly, not for the full dead-end window: nothing was learned
+        // about the index here, only about how busy it was this second.
+        trace("timeout/none", subject);
+        unanswerable.set(key, Date.now() - (DEAD_END_TTL_MS - SLOW_RETRY_MS));
+        return undefined;
+      }
       trace("answer", subject, `${result.ms}ms`, `${result.spots.length} spots`,
         JSON.stringify(result.spots[0]?.signals ?? []));
 
@@ -824,7 +879,24 @@ export default function piCodeLens(pi: ExtensionAPI) {
       // evidence behind it. Callers and flows are the knowledge grep cannot get.
       const structural = result.spots.filter((s) =>
         s.signals.some((sig) => /caller|flow/i.test(sig)) || s.breaks.length > 0);
-      if (!structural.length) { unanswerable.set(key, Date.now()); return undefined; }
+      if (!structural.length) {
+        // A name with no callers may still be a FILE, and the graph knows what
+        // imports it. A large share of what agents search for is module-shaped
+        // — `actuator`, `file-lock`, `lane-bar` — and those met silence from an
+        // index holding 1,671 import edges nobody asked about.
+        const importers = await new GraphEngine().importersOf(subject, undefined, 5);
+        if (importers.length) {
+          answered.set(key, Date.now());
+          return {
+            subject,
+            body: `imported by ${importers.length} file${importers.length === 1 ? '' : 's'}: ` +
+                  importers.map((f) => f.split('/').slice(-2).join('/')).join(', '),
+            files: importers,
+          };
+        }
+        unanswerable.set(key, Date.now());
+        return undefined;
+      }
 
       // A caller list describes the commit it was built from. Far enough behind
       // and it describes a different codebase — and this block arrives in
@@ -840,7 +912,13 @@ export default function piCodeLens(pi: ExtensionAPI) {
       }
 
       answered.set(key, Date.now());
-      return { subject, body: render(structural, budgetTokens) };
+      // Carry the lines that do the work, not just the address. A pointer makes
+      // the agent open the file; the crux often means it never has to.
+      const top = structural[0]!;
+      const lifted = crux(top.file, top.line, cwd);
+      const body = render(structural, budgetTokens) +
+        (lifted ? `\n\n${top.file}:${top.line}\n\`\`\`\n${lifted}\n\`\`\`` : '');
+      return { subject, body, files: structural.map((s) => s.file) };
     } catch (e) {
       trace("failed", subject, String((e as Error)?.message ?? e).slice(0, 120));
       unanswerable.set(key, Date.now());   // an engine that failed once will fail again this turn
