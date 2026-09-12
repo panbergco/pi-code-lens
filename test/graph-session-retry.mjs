@@ -7,7 +7,14 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { GraphEngine } from '../dist/engines/graph.js';
 
-let sessions = 0, rejectedOnce = false;
+let sessions = 0, rejected = 0;
+/** Every phrasing this engine has used for "your session is gone". The second
+ *  slipped past a pattern written for the first and made every query answer
+ *  "no index" against a perfectly good index, mid-measurement. */
+const DEAD_WORDINGS = [
+  'Session not found. Re-initialize.',
+  'First request must be initialize. No session ID provided.',
+];
 
 const server = http.createServer((req, res) => {
   let body = '';
@@ -20,11 +27,15 @@ const server = http.createServer((req, res) => {
     }
     if (msg.method === 'notifications/initialized') return res.end('{}');
     // First real call on the first session dies the way a restarted engine dies.
-    if (!rejectedOnce) {
-      rejectedOnce = true;
+    // The wording varies, and each variant was found only after it broke
+    // something: the recovery must key on the CONDITION, not on one sentence.
+    // Each engine meets ONE dead session: its first. The retry opens a second
+    // session, which must work — a recovery that keeps failing is a loop, not a
+    // repair, so the fixture has to let the retry succeed.
+    if (sessions % 2 === 1 && rejected < DEAD_WORDINGS.length) {
       return res.end(JSON.stringify({
         jsonrpc: '2.0', id: msg.id,
-        error: { message: 'Session not found. Re-initialize.' },
+        error: { message: DEAD_WORDINGS[rejected++] },
       }));
     }
     res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'impact' }] } }));
@@ -32,11 +43,15 @@ const server = http.createServer((req, res) => {
 });
 
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const engine = new GraphEngine(`http://127.0.0.1:${server.address().port}/mcp`);
 
-const tools = await engine.capabilities();
-assert.deepEqual(tools, ['impact'], 'a dead session must re-initialize and answer, not throw');
-assert.equal(sessions, 2, 'the dead session id must be replaced, not reused');
+// One engine per wording: a long-lived process meets these one at a time, and
+// each must recover on its own.
+for (const wording of DEAD_WORDINGS) {
+  const e = new GraphEngine(`http://127.0.0.1:${server.address().port}/mcp`);
+  const tools = await e.capabilities();
+  assert.deepEqual(tools, ['impact'], `a dead session must re-initialize and answer, not throw: ${wording}`);
+}
+assert.equal(sessions, DEAD_WORDINGS.length * 2, 'each dead session id is replaced, never reused');
 
 server.close();
 console.log('ok — graph engine recovers from an expired session');

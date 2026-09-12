@@ -68,8 +68,15 @@ export class GraphEngine implements Engine {
     // holds a dead id and EVERY structural answer degrades silently — health
     // reports "indexed: none", sending the user to re-index an index that was
     // never missing. Re-initialize once instead.
+    // Three wordings seen from this engine for the same condition, each found
+    // the hard way: "Session not found. Re-initialize.", a bare 404, and
+    // "First request must be initialize. No session ID provided." The last one
+    // slipped through a pattern written for the first two and took out an entire
+    // measurement run — every query answering "no index" while the index was
+    // fine. Match the CONDITION (this connection has no usable session), not one
+    // sentence the engine happens to use today.
     const dead = res.status === 404
-      || /session not found|re-?initialize/i.test(doc.error?.message ?? '');
+      || /session not found|re-?initialize|no session id/i.test(doc.error?.message ?? '');
     if (dead && retry) {
       this.session = null;
       this.cachedHealth = null;
