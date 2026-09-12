@@ -679,8 +679,24 @@ export default function piCodeLens(pi: ExtensionAPI) {
     if (!symbol) return;
     if (freshness(ctx.cwd).state === "unindexed") return;
     if (recall().answered.has(symbol.toLowerCase())) return;
-    const answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
-    if (!answer) return;
+
+    // A file is not a symbol. `lane-mint.ts`, `dataset.ts`, `capture-control.mjs`
+    // name FILES, and asking the caller graph about them returns nothing — which
+    // is why this channel delivered zero while the graph held 7 importers for
+    // dataset.ts and 8 for proof.ts. Ask about the symbol when the name is one,
+    // and about the file otherwise.
+    let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
+    if (!answer) {
+      const importers = await new GraphEngine().importersOf(symbol, undefined, 6);
+      if (!importers.length) return;   // nothing depends on it: nothing to warn about
+      answer = {
+        subject: symbol,
+        body: `imported by ${importers.length} file${importers.length === 1 ? "" : "s"}: ` +
+              importers.map((f) => f.split("/").slice(-2).join("/")).join(", "),
+        files: importers,
+      };
+      answered.set(symbol.toLowerCase(), Date.now());
+    }
     augmentHits++;
     trace("blast radius", symbol);
     return {

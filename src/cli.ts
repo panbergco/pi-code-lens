@@ -40,7 +40,8 @@ OPERATE
   lens refresh [--repo R] [--graph-only] [--semantic-every MIN] [--dry-run]
                                      incremental update of both indexes
   lens doctor [--parity] [--json]    health, GPU residency, capability parity
-  lens kpi [--since-hours N]         did this repo's agents get answered when they
+  lens kpi [--since-hours N] [--sessions a,b]
+                                     did this repo's agents get answered when they
                                      could have been? (per checkout, never averaged)
   lens install [--hot-load] [--npu] [--gpu-graph N] [--gpu-semantic M] [--dry-run]
                                      installs GitNexus + ccc; auto-detects CPU/CUDA/ROCm
@@ -143,7 +144,11 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'kpi':
-      return kpi({ repo: str(flags.repo), sinceHours: Number(flags['since-hours']) || undefined });
+      return kpi({
+        repo: str(flags.repo),
+        sinceHours: Number(flags['since-hours']) || undefined,
+        sessions: str(flags.sessions)?.split(',').map((s) => s.trim()).filter(Boolean),
+      });
     case 'refresh':
       return refresh({
         repo: str(flags.repo),

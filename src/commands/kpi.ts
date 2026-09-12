@@ -62,6 +62,22 @@ export interface Kpi {
   recentlyTold: number;
   misses: Array<[string, number]>;
   sessions: number;
+  /** What was measured, when it was not simply "this checkout". */
+  scope?: string;
+}
+
+/** Files something imports — the only honest test of whether an EDIT is
+ *  addressable. A file stem is not a symbol name: `dataset.ts` never appears in
+ *  the caller graph, yet seven files import it, so testing the stem against
+ *  symbol names scored every such edit as unanswerable and hid a whole channel. */
+async function importedFiles(repo: string | undefined, graph: GraphEngine): Promise<Set<string>> {
+  const out: any = await graph.passthrough('cypher', {
+    query: "MATCH ()-[r:CodeRelation]->(b) WHERE r.type='IMPORTS' AND b.name IS NOT NULL " +
+           'RETURN DISTINCT b.name AS name LIMIT 20000',
+    ...(repo ? { repo } : {}),
+  });
+  return new Set(String(out?.markdown ?? '').split('\n').slice(2)
+    .map((l) => l.replace(/\|/g, '').trim().toLowerCase().replace(/\.[^.]+$/, '')).filter(Boolean));
 }
 
 /** Names the graph can say something structural about, in one batch query. */
@@ -76,11 +92,14 @@ async function knownNames(repo: string | undefined, graph: GraphEngine): Promise
   return new Set(rows);
 }
 
-export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number } = {}): Promise<number> {
+export async function kpi(
+  o: { repo?: string; cwd?: string; sinceHours?: number; sessions?: string[] } = {},
+): Promise<number> {
   const cwd = o.cwd ?? process.cwd();
   const graph = new GraphEngine();
   const repoArg = await graph.repoArg(cwd, o.repo);
   const known = await knownNames((repoArg as any).repo, graph);
+  const imported = await importedFiles((repoArg as any).repo, graph);
   if (!known.size) {
     console.log('no structural index for this repo — nothing to measure. run: lens refresh');
     return 1;
@@ -96,12 +115,19 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
       edit: { happened: 0, addressable: 0, served: 0 },
     },
     byAnswer: 0, byTool: 0, nudged: 0, recentlyTold: 0, misses: [], sessions: 0,
+    scope: o.sessions?.length ? `${o.sessions.length} named session(s)` : undefined,
   };
   const missed = new Map<string, number>();
 
   let files: string[] = [];
   try { files = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); }
   catch { console.log(`no pi sessions recorded for ${cwd}`); return 1; }
+  // Narrow to named sessions when asked. A checkout's transcripts include every
+  // session ever opened in it — including throwaway probes — and mixing those
+  // with the agents actually doing the work measures the wrong population. The
+  // id is the one on each session's status line.
+  if (o.sessions?.length)
+    files = files.filter((f) => o.sessions!.some((id) => f.includes(id)));
 
   for (const f of files) {
     const path = join(dir, f);
@@ -181,7 +207,10 @@ export async function kpi(o: { repo?: string; cwd?: string; sinceHours?: number 
       if (e.kind === 'edit' && CODE_PATH_RE.test(e.path ?? '')) {
         const sym = (e.path!.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
         K.moments.edit.happened++;
-        if (!known.has(sym.toLowerCase())) continue;
+        // Addressable when the graph knows the symbol OR knows that something
+        // imports the file. Test files and entry points import nothing and are
+        // correctly excluded — a blast radius for a leaf is not knowledge.
+        if (!known.has(sym.toLowerCase()) && !imported.has(sym.toLowerCase())) continue;
         K.moments.edit.addressable++;
         const before = ev.slice(Math.max(0, i - 8), i);
         const after = ev.slice(i + 1, i + 3);
@@ -205,7 +234,8 @@ function render(K: Kpi, hours: number): void {
   const pct = (a: number, b: number) => (b ? `${(a / b * 100).toFixed(1)}%` : '—');
   const A = Object.values(K.moments).reduce((n, m) => n + m.addressable, 0);
   const S = Object.values(K.moments).reduce((n, m) => n + m.served, 0);
-  console.log(`code-lens effectiveness — ${K.repo} · last ${hours}h · ${K.sessions} session(s)\n`);
+  console.log(`code-lens effectiveness — ${K.repo} · last ${hours}h · ${K.sessions} session(s)` +
+              `${K.scope ? ` · ${K.scope}` : ''}\n`);
   console.log('  moment'.padEnd(14) + 'happened'.padStart(10) + 'index could'.padStart(13) + 'index did'.padStart(11) + 'KPI'.padStart(8));
   for (const [name, m] of Object.entries(K.moments))
     console.log(`  ${name}`.padEnd(14) + String(m.happened).padStart(10) + String(m.addressable).padStart(13) +
