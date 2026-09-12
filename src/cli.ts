@@ -18,6 +18,7 @@ import { askViaServer } from './server/client.js';
 import { serve } from './server/server.js';
 import { mcp } from './commands/mcp.js';
 import { doctor } from './commands/doctor.js';
+import { kpi } from './commands/kpi.js';
 import { install } from './install/installer.js';
 import { refresh } from './commands/refresh.js';
 
@@ -39,6 +40,8 @@ OPERATE
   lens refresh [--repo R] [--graph-only] [--semantic-every MIN] [--dry-run]
                                      incremental update of both indexes
   lens doctor [--parity] [--json]    health, GPU residency, capability parity
+  lens kpi [--since-hours N]         did this repo's agents get answered when they
+                                     could have been? (per checkout, never averaged)
   lens install [--hot-load] [--npu] [--gpu-graph N] [--gpu-semantic M] [--dry-run]
                                      installs GitNexus + ccc; auto-detects CPU/CUDA/ROCm
   lens serve                         hot server (engines stay warm)
@@ -139,6 +142,8 @@ export async function main(argv: string[]): Promise<number> {
       console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 2));
       return 0;
     }
+    case 'kpi':
+      return kpi({ repo: str(flags.repo), sinceHours: Number(flags['since-hours']) || undefined });
     case 'refresh':
       return refresh({
         repo: str(flags.repo),

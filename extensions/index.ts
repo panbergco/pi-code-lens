@@ -49,6 +49,7 @@ import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.
 import { askViaServer, serverUp } from "../src/server/client.js";
 import { refresh } from "../src/commands/refresh.js";
 import { doctor } from "../src/commands/doctor.js";
+import { kpi } from "../src/commands/kpi.js";
 
 // ─── Index freshness — event-driven, pi-native ───────────────────────────────
 //
@@ -279,6 +280,7 @@ const VERBS: Record<string, string> = {
   semantic: "semantic command by name, e.g. semantic status",
   caps: "every capability reachable through the lens",
   doctor: "engine health, residency and capability parity",
+  kpi: "did THIS repo's agents get answered when they could have been?",
   refresh: "reindex this repository now",
   augment: "on|off — answer searches automatically (default on)",
 };
@@ -510,6 +512,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
           }
           case "doctor":
             return show(await captureOutput(() => doctor({ parity: true })));
+          case "kpi":
+            // Always THIS checkout. The number is a property of the repo, not of
+            // the tool: measured across four repos on one build it ran 0% to 97%,
+            // moved entirely by what those agents spend the day doing.
+            return show(await captureOutput(() => kpi({
+              cwd: ctx.cwd,
+              sinceHours: Number(text) || undefined,
+            })));
           case "refresh":
             show("reindexing — the status line shows progress");
             return void runRefresh(ctx, "asked by hand");

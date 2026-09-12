@@ -33,3 +33,19 @@ assert.equal(saveSettings(DEFAULTS, '/etc/passwd/nope/settings.json'), false,
 
 rmSync(dir, { recursive: true, force: true });
 console.log('ok — settings persist, clamp what is absurd, and survive a bad hand edit');
+
+
+// ── the KPI reads the right transcripts for the repo it is asked about ──────
+// A KPI pointed at another repo's sessions is worse than no KPI: it reports a
+// number that is real, precise, and about somebody else's work. pi files
+// sessions under the absolute path with the separators flattened, so this one
+// mapping decides whether the whole measurement is about this checkout.
+{
+  const { sessionDirFor } = await import('../dist/commands/kpi.js');
+  assert.equal(sessionDirFor('/home/user/Code/project', '/home/user'),
+    '/home/user/.pi/agent/sessions/--home-user-Code-project--',
+    'the session directory is derived from the checkout path, not guessed');
+  assert.notEqual(sessionDirFor('/home/user/Code/other', '/home/user'),
+    sessionDirFor('/home/user/Code/project', '/home/user'),
+    'two checkouts never share a transcript set');
+}

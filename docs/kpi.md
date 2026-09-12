@@ -3,10 +3,10 @@
 One number, honestly bounded: **of the moments the index could have answered,
 what share did it actually answer?**
 
-Run it with:
+Run it in the repository you care about:
 
 ```bash
-node scripts/kpi.mjs <pi-session-dir> <repo-dir> [since-iso]
+lens kpi [--since-hours N]     # or /lens kpi inside a pi session
 ```
 
 ## What counts as a moment
@@ -50,6 +50,21 @@ prompts that got a pack:                  31   (nudged instead: 0)
 distinct subjects the index knew and never spoke about: 87
 top misses: sprint×147, tick×11, PREFLIGHT×10, refused×6, declared×6, serve×5, readCheckManifest×4, attributedTitles×4
 ```
+
+## It is per project — expect repos to differ
+
+The KPI belongs to a checkout, not to the tool. Measured on ONE build, one day, four
+repositories:
+
+| repo | overall KPI | why |
+|---|---:|---|
+| pi-multi-line-status | **97.2%** | conversational work on a small, fully indexed tree — nearly every prompt got a pack |
+| a large monorepo | **47.3%** | huge repo, agents mostly file release paperwork and poll panes; the code searches they do make are answered about half the time |
+| pi-code-lens | **38.5%** | few sessions, mostly editing rather than searching |
+| a small extension repo | **0.0%** | 3 addressable moments in 72h — too small to mean anything yet |
+
+Differences of this size are normal and are not faults. Never average them, and never
+quote one repo's KPI as "code-lens's number". When a repo looks bad, the rows say why.
 
 ## How to read it
 

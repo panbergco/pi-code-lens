@@ -59,6 +59,45 @@ search: definition, callers, execution flows and risk — what the text match ca
 Treat it as evidence, not decoration, and follow it instead of grepping again. It is absent
 when the index had nothing structural to add.
 
+## Context pushed in before a turn
+
+A turn may open with `[code-lens — what the index already knows about this task]`, listing
+spots with callers before any tool has run. That is this index answering the prompt up
+front. Follow those pointers; do not grep for what is already listed. A line saying `no
+strong structural match` means the probe found nothing solid — call `lens_ask` explicitly
+before falling back to a broad search.
+
+## Is it actually working here? — `lens kpi`
+
+Run `lens kpi` (or `/lens kpi`) in a repository to get one number: **of the moments the
+index could have answered, what share did it?** It reads the agents' own transcripts, so it
+cannot be flattered by what this tool says about itself.
+
+```
+  moment        happened  index could  index did     KPI
+  search            4415         1512        778   51.5%
+  prompt            2414          120         31   25.8%
+  edit              1012          109         14   12.8%
+```
+
+**The KPI is per checkout, and differences between repos are expected, not faults.**
+Measured on one build, one day, four repositories: **47.3%**, **38.5%**, **97.2%**, **0.0%**.
+The number moves with what that repo's agents spend the day doing and how complete its
+index is — a repo whose agents file paperwork and poll panes sits far below one whose
+agents read code, with nothing wrong anywhere. Never average them, and never quote one
+repo's KPI as the tool's.
+
+What the rows mean when a number looks bad:
+
+- **search low** — searches are happening that the index could serve and is not. Check
+  freshness first (`/lens`), then the missed-subject list the report prints.
+- **prompt low** — prompts name code the index knows but no pack was injected: usually a
+  cold engine timing out inside the per-prompt budget.
+- **edit low** — symbols are being changed without their blast radius pulled first. This is
+  normally the weakest row, and it is a habit gap rather than an index gap.
+- **"because an agent chose a lens tool"** near zero is the expected shape. Adoption comes
+  from the index speaking first, not from being selected.
+
 ## Duplicate work
 
 Before writing a new helper, ask `lens_ask` whether it already exists. Reimplementing code

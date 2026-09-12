@@ -160,6 +160,34 @@ Latency is the product. Every design rule here exists to protect it: engines are
 long-lived services, the CLI loads no model, the router never calls a model, and every
 structural lookup is time-boxed.
 
+### Is it working *here*? — `lens kpi`
+
+One number, read from the agents' own transcripts rather than from anything this project
+says about itself: **of the moments the index could have answered, what share did it?**
+
+```
+$ lens kpi
+code-lens effectiveness — a large monorepo · last 72h · 38 session(s)
+
+  moment        happened  index could  index did     KPI
+  search            4415         1512        778   51.5%
+  prompt            2414          120         31   25.8%
+  edit              1012          109         14   12.8%
+  ------------------------------------------------------
+  OVERALL           7841         1741        823   47.3%
+```
+
+**It is per checkout, and repos differ enormously.** One build, one day, four repositories:
+**47.3%**, **38.5%**, **97.2%**, **0.0%** — driven by what each repo's agents spend the day
+doing and how complete its index is, not by the engine. Never average them.
+
+The denominator is the whole exercise, so it is enforced in code ([`src/commands/kpi.ts`](src/commands/kpi.ts)):
+the index must actually hold structure for the subject; the command must be a code search
+(of 33,189 commands containing `grep` in one repo, 21,389 were release paperwork and 8,895
+were `tmux capture-pane | grep Working` polling other agents); and the subject must look
+like code, because `sprint` and `CHECK` are English words that are also symbols. Skipping
+those filters reports 20.8% where the honest number is 49.2%.
+
 ## Documentation
 
 | doc | covers |
@@ -170,6 +198,7 @@ structural lookup is time-boxed.
 | [docs/installer.md](docs/installer.md) | how both engines are placed, GPU hot-load, keep-warm |
 | [docs/engines.md](docs/engines.md) | the two engines, their models, what each is good at |
 | [docs/parity.md](docs/parity.md) | the 100%-coverage requirement and how it is enforced |
+| [docs/kpi.md](docs/kpi.md) | the effectiveness KPI: what counts as a moment, what counts as *could have*, why it is per repo |
 | [docs/coexistence.md](docs/coexistence.md) | living beside a framework that owns the same hooks |
 | [docs/decisions.md](docs/decisions.md) | design rulings and the measurements behind them |
 
