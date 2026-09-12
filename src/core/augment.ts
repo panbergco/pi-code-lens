@@ -101,12 +101,18 @@ export function tokenizeCommand(cmd: string): string[] {
       continue;
     }
     if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (ch === '|' || ch === ';') {
-      flush(); tokens.push('|');
-      if (ch === '|' && cmd[i + 1] === '|') i++;
+    // A real PIPE and a mere separator are different facts, and collapsing them
+    // hid one: `a | grep x` filters output, while `cd /r; grep x src` searches
+    // code. Both used to tokenize identically, so either every sequenced search
+    // is discarded or every piped filter is answered. Keep them apart.
+    if (ch === '|') {
+      flush();
+      tokens.push(cmd[i + 1] === '|' ? ';' : '|');   // `||` is control flow, not a pipe
+      if (cmd[i + 1] === '|') i++;
       continue;
     }
-    if (ch === '&' && cmd[i + 1] === '&') { flush(); tokens.push('|'); i++; continue; }
+    if (ch === ';') { flush(); tokens.push(';'); continue; }
+    if (ch === '&' && cmd[i + 1] === '&') { flush(); tokens.push(';'); i++; continue; }
     if (/\s/.test(ch)) flush(); else current += ch;
   }
   flush();
@@ -154,12 +160,37 @@ function subjectFromShell(command: string): { subject: string; origin: 'pattern'
   const tokens = tokenizeCommand(command);
   let afterSearch = false;
   let afterFileCmd = false;
+  /** Is this grep reading a pipe rather than the codebase? */
+  let piped = false;
+  /** First word of the current segment — what is feeding the pipe. */
+  let upstream = '';
+  /** Commands whose output IS the codebase: filtering them is still a real
+   *  question about code. `ls packages | grep premiseVerdicts` asks where a file
+   *  is; `vitest run | grep verdict` asks how a test run went. */
+  const LISTINGS = new Set(['ls', 'find', 'fd', 'git', 'tree', 'cat']);
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
-    if (token === '|') { afterSearch = false; afterFileCmd = false; continue; }
+    // A grep AFTER a pipe is filtering command OUTPUT, not searching code:
+    //   `vitest run x.test.ts | grep -E "verdict|FAIL"` asks about a test run,
+    //   `pisg query … | grep -c verdict` counts rows.
+    // Both were read as questions about the symbol `verdict`, and answered with
+    // its callers — context spent on something nobody asked. They also inflated
+    // the effectiveness denominator, which is how a busy repo looked like it was
+    // searching code hundreds of times an hour when it was watching test output.
+    if (token === '|') {
+      afterSearch = false; afterFileCmd = false;
+      piped = !LISTINGS.has(upstream);   // a listing still feeds a real search
+      upstream = '';
+      continue;
+    }
+    // A sequenced command starts fresh: `date; cd /repo; grep -rn X src` is a
+    // search, and nothing before the semicolon feeds it.
+    if (token === ';') { afterSearch = false; afterFileCmd = false; piped = false; upstream = ''; continue; }
+    if (!upstream && !token.startsWith('-')) upstream = token;
 
     if (token === 'grep' || token === 'rg' || token === 'ag') {
+      if (piped) { afterSearch = false; continue; }   // filtering output: not our question
       afterSearch = true; afterFileCmd = false; continue;
     }
     if (afterSearch) {

@@ -109,3 +109,28 @@ console.log('ok — a search is answered only when there is a real subject and s
     subjectsForSearch('bash', { command: 'grep -rn "claimSlice" packages' }, 'bash: grep: command not found', fresh()),
     [], 'a broken shell still gets silence');
 }
+
+
+// ── a pipe is not a search ──────────────────────────────────────────────────
+// Measured on a large monorepo: agents pipe test runs and database queries through
+// grep constantly, and every one was read as a question about whatever word
+// followed — `vitest run … | grep -E "verdict|FAIL"` was answered with the
+// callers of `verdict`. Context spent on something nobody asked, and an
+// effectiveness denominator inflated by hundreds of "searches" an hour that were
+// people watching output scroll past.
+//
+// The distinction is what feeds the pipe: a LISTING is still the codebase.
+assert.equal(searchSubject('bash', { command: 'node main.js suite npx vitest run x.test.ts 2>&1 | grep -E "verdict|FAIL"' }),
+  null, 'filtering a test run is not a question about code');
+assert.equal(searchSubject('bash', { command: 'pisg query "select * from findings" | grep -c verdict' }),
+  null, 'counting rows in query output is not a question about code');
+assert.equal(searchSubject('bash', { command: 'ls packages | grep premiseVerdicts' }),
+  'premiseVerdicts', 'but filtering a file listing still asks where something lives');
+assert.equal(searchSubject('bash', { command: 'git ls-files | grep claimSlice' }),
+  'claimSlice', 'and so does filtering the tracked files');
+
+// Sequencing is not piping: everything before `;` or `&&` merely ran first.
+assert.equal(searchSubject('bash', { command: 'date; cd /repo; grep -rn "archiveSprint" src/sprint.ts' }),
+  'archiveSprint', 'a search after a sequence separator is still a search');
+assert.equal(searchSubject('bash', { command: 'cd /repo && rg -n "parseRoadmap" packages/core | head -3' }),
+  'parseRoadmap', 'and piping its RESULTS into head changes nothing');

@@ -55,6 +55,10 @@ export interface Kpi {
   byAnswer: number;
   byTool: number;
   nudged: number;
+  /** Why the unserved moments went unserved. A KPI that reports only a
+   *  percentage sends the reader to write their own script, and two scripts
+   *  disagreeing about the same hour is how a day gets lost. */
+  why: Record<string, number>;
   /** Moments left unanswered ON PURPOSE, because the same subject was answered
    *  minutes earlier and is still in the reader's context. Counting these as
    *  failures measures the memory doing its job: on a large monorepo they were
@@ -115,6 +119,7 @@ export async function kpi(
       edit: { happened: 0, addressable: 0, served: 0 },
     },
     byAnswer: 0, byTool: 0, nudged: 0, recentlyTold: 0, misses: [], sessions: 0,
+    why: {},
     scope: o.sessions?.length ? `${o.sessions.length} named session(s)` : undefined,
   };
   const missed = new Map<string, number>();
@@ -188,8 +193,13 @@ export async function kpi(
         const after = ev.slice(i + 1, i + 4);
         if (after.some((x) => x.kind === 'answer' && x.subject === e.subject)) { K.moments.search.served++; K.byAnswer++; }
         else if (after.some((x) => x.kind === 'lens' && x.subject?.includes(e.subject!.toLowerCase()))) { K.moments.search.served++; K.byTool++; }
-        else if (told.has(e.subject.toLowerCase()) && e.t - told.get(e.subject.toLowerCase())! < 30 * 60_000) K.recentlyTold++;
-        else missed.set(e.subject, (missed.get(e.subject) ?? 0) + 1);
+        else if (told.has(e.subject.toLowerCase()) && e.t - told.get(e.subject.toLowerCase())! < 30 * 60_000) {
+          K.recentlyTold++;
+          bump(K, 'search: already answered minutes ago');
+        } else {
+          missed.set(e.subject, (missed.get(e.subject) ?? 0) + 1);
+          bump(K, 'search: never answered in this session');
+        }
       }
       if (e.kind === 'prompt' && (e.text?.length ?? 0) >= 12) {
         K.moments.prompt.happened++;
@@ -202,7 +212,8 @@ export async function kpi(
         if (!packed && !words.some((w) => known.has(w.toLowerCase()))) continue;
         K.moments.prompt.addressable++;
         if (packed) K.moments.prompt.served++;
-        else if (near.some((x) => x.kind === 'nudge')) K.nudged++;
+        else if (near.some((x) => x.kind === 'nudge')) { K.nudged++; bump(K, 'prompt: nudged, not answered'); }
+        else bump(K, 'prompt: named known code, got nothing');
       }
       if (e.kind === 'edit' && CODE_PATH_RE.test(e.path ?? '')) {
         const sym = (e.path!.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
@@ -221,6 +232,14 @@ export async function kpi(
                                (x.kind === 'answer' && x.subject?.toLowerCase() === sym.toLowerCase())) ||
             after.some((x) => x.kind === 'radius' && x.subject?.toLowerCase() === sym.toLowerCase()))
           K.moments.edit.served++;
+        // An edit loop is the normal shape of work: 72 edits in one hour landed
+        // on 13 files, three of them test files saved 16, 12 and 10 times. One
+        // answer per file per repeat window is the DESIGN, so scoring every
+        // later save as a failure measures the memory, not the tool.
+        else if (told.has(sym.toLowerCase()) && e.t - told.get(sym.toLowerCase())! < 30 * 60_000) {
+          K.recentlyTold++;
+          bump(K, 'edit: same file answered minutes ago');
+        } else bump(K, 'edit: no blast radius offered');
       }
     }
   }
@@ -229,6 +248,8 @@ export async function kpi(
   render(K, o.sinceHours ?? 24);
   return 0;
 }
+
+const bump = (K: Kpi, k: string) => { K.why[k] = (K.why[k] ?? 0) + 1; };
 
 function render(K: Kpi, hours: number): void {
   const pct = (a: number, b: number) => (b ? `${(a / b * 100).toFixed(1)}%` : '—');
@@ -253,8 +274,15 @@ function render(K: Kpi, hours: number): void {
   if (K.recentlyTold)
     console.log(`  held back — same answer given <30 min ago:  ${K.recentlyTold}` +
                 `  (counted as a miss above; the memory working, not a gap)`);
+  const why = Object.entries(K.why).sort((a, b) => b[1] - a[1]);
+  if (why.length) {
+    const total = why.reduce((n, [, v]) => n + v, 0);
+    console.log(`\n  why the other ${total} went unanswered:`);
+    for (const [k, v] of why)
+      console.log(`    ${String(v).padStart(5)}  ${(v / total * 100).toFixed(0).padStart(3)}%  ${k}`);
+  }
   if (K.misses.length)
-    console.log(`  known but never spoken about: ${K.misses.map(([s, n]) => `${s}×${n}`).join(', ')}`);
+    console.log(`\n  known but never spoken about: ${K.misses.map(([s, n]) => `${s}×${n}`).join(', ')}`);
   console.log('\n  This number belongs to THIS checkout. It moves with what its agents do all');
   console.log('  day and how complete its index is — comparing two repos compares their work.');
 }
