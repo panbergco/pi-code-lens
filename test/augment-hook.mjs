@@ -16,6 +16,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// This suite must not depend on whether the machine happens to be reindexing:
+// the prompt hook correctly stays silent during a real pass, and a test that
+// does not say so goes red to prove the feature works.
+process.env.LENS_TEST_NO_PASS = '1';
+
 // ── a repository that looks indexed, so freshness() does not veto ────────────
 const repo = mkdtempSync(join(tmpdir(), 'lens-hook-'));
 mkdirSync(join(repo, '.gitnexus'), { recursive: true });
@@ -237,3 +242,35 @@ rmSync(repo, { recursive: true, force: true });
 }
 
 console.log('ok — an edited symbol arrives with its dependents, once');
+
+
+// ── the prompt hook may never spend a PERSON's time ─────────────────────────
+// This hook runs between the human pressing enter and the turn starting, so its
+// budget is somebody's attention, not an agent's turn. Measured by the operator
+// before this bound existed: 4,764 ms per submit and 51,898 ms on the first,
+// against 128 ms for the same session without this extension — and during a
+// 7,129 ms stall the process used 240 ms of CPU and slept through 103 of 107
+// samples. It was waiting on a reindexing engine, in front of a watching human.
+{
+  mkdirSync(join(repo, '.gitnexus'), { recursive: true });
+  mkdirSync(join(repo, '.code-lens'), { recursive: true });
+  writeFileSync(join(repo, '.gitnexus', 'meta.json'),
+    JSON.stringify({ lastCommit: 'a'.repeat(40), indexedAt: new Date().toISOString() }));
+  writeFileSync(join(repo, '.code-lens', 'settings.json'),
+    JSON.stringify({ timeoutMs: 30_000, hookBudgetMs: 300, repeatAfterMinutes: 0 }));
+  const { default: ext } = await import(`../.test-dist/extensions/index.js?budget=${Date.now()}`);
+  const h = {};
+  ext({ registerTool: () => {}, registerCommand: () => {},
+        getActiveTools: () => ['lens_ask'], on: (n, fn) => { h[n] = fn; } });
+
+  reset();
+  delayMs = 10_000;                       // an engine that will not answer today
+  const t0 = Date.now();
+  const r = await h.before_agent_start({ prompt: 'where does a lane grant get refused?',
+                                         systemPrompt: 'You are a coding assistant.' }, ctx);
+  const waited = Date.now() - t0;
+  assert.ok(waited < 2_000, `the turn must start without us, not after the engine (waited ${waited}ms)`);
+  assert.equal(r?.message, undefined, 'and no pack is invented from an answer that never came');
+}
+
+console.log('ok — a slow index delays the turn by a deadline, never by an engine');

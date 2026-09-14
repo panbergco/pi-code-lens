@@ -49,7 +49,7 @@ import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
 import { askViaServer, serverUp } from "../src/server/client.js";
-import { refresh } from "../src/commands/refresh.js";
+import { indexRunning, refresh } from "../src/commands/refresh.js";
 import { GraphEngine } from "../src/engines/graph.js";
 import { doctor } from "../src/commands/doctor.js";
 import { kpi } from "../src/commands/kpi.js";
@@ -252,6 +252,18 @@ const estimateTokens = (text: string) => Math.ceil(text.length / 4);
  * six hours and could be answered once. So memory expires — quickly enough to
  * stay useful, slowly enough not to repeat itself in the same stretch of work.
  */
+/**
+ * One engine for this session, not one per question.
+ *
+ * Every `new GraphEngine()` opens a fresh MCP session against the graph server,
+ * which costs ~200 ms and holds a live server object until it times out. Four
+ * call sites constructed one each, so a single prompt pack paid that handshake
+ * three times over and blew a 400 ms budget doing protocol, not work — and left
+ * three sessions behind against a 1,000-session cap.
+ */
+let sharedGraph: GraphEngine | undefined;
+const graphEngine = () => (sharedGraph ??= new GraphEngine());
+
 const DEAD_END_TTL_MS = 10 * 60_000; // the index changes; a miss is not permanent
 /**
  * A TIMEOUT is not a dead end.
@@ -610,8 +622,42 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // their own comment records the same finding from the other side: they
     // assumed a skipped pack was recoverable because "the agent pulls", traced a
     // session, and found it grepped 38 times instead.
-    const pack = await promptPack(event.prompt, ctx.cwd);
-    const map = await repoMap(ctx.cwd);
+    // ── ONE deadline, over everything, charged to the RIGHT person ───────────
+    // This hook runs between the human pressing enter and the turn starting, so
+    // every millisecond spent here is a millisecond a PERSON waits watching a
+    // dead terminal. That was not true of the tool_result hook this grew out of,
+    // where the same budget is paid by an agent mid-turn, and the placement
+    // changed without the budget changing with it.
+    //
+    // Measured by the operator, same session and machine, extension by extension:
+    //   pi-reverse only      128 ms
+    //   pi-code-lens only    4,764 / 5,219 ms, and 51,898 ms on the first submit
+    // With, during a 7,129 ms stall: 240 ms of CPU, 1 major fault, asleep in 103
+    // of 107 samples. Not working — waiting, on a local engine that was
+    // reindexing.
+    //
+    // So: one ceiling over the WHOLE hook, not a budget per lookup, and it is a
+    // hard wall rather than a target. Past it the turn starts without us. A pack
+    // is worth having; it is not worth four seconds of somebody's attention, and
+    // an index too busy to answer in 400 ms will answer the next prompt instead.
+    // Each piece races the SAME wall independently, and whatever arrived is
+    // kept. Racing them together was worse than either: Promise.all resolves
+    // only when both do, so a cold repo map — orientation, the least urgent
+    // thing here — threw away a pack that had been ready in 120 ms. Measured:
+    // the pack answers in 120-290 ms while the map's first call pays ~400 ms to
+    // open its own engine session.
+    const wall = Date.now() + settings.hookBudgetMs;
+    const byWall = <T>(p: Promise<T>, what: string) => Promise.race([
+      p,
+      new Promise<undefined>((r) => setTimeout(() => {
+        trace("hook deadline", `${what} missed ${settings.hookBudgetMs}ms — turn starts without it`);
+        r(undefined);
+      }, Math.max(1, wall - Date.now()))),
+    ]);
+    const [pack, map] = await Promise.all([
+      byWall(promptPack(event.prompt, ctx.cwd), "pack"),
+      byWall(repoMap(ctx.cwd), "repo map"),
+    ]);
 
     const announced = ANNOUNCED_BY_PI.test(event.systemPrompt) || event.systemPrompt.includes(RULES_HEADING);
     const result: { systemPrompt?: string; message?: any } = {};
@@ -687,7 +733,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // and about the file otherwise.
     let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
     if (!answer) {
-      const importers = await new GraphEngine().importersOf(symbol, undefined, 6);
+      const importers = await graphEngine().importersOf(symbol, undefined, 6);
       if (!importers.length) return;   // nothing depends on it: nothing to warn about
       answer = {
         subject: symbol,
@@ -819,7 +865,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
     mapSent = true;   // set before the await: one attempt per session, success or not
     if (freshness(cwd).state === "unindexed") return undefined;
     try {
-      const hubs = await new GraphEngine().hubs(undefined, 8);
+      // Bounded like everything else on this path. Unbounded, this ONE call was
+      // the 51,898 ms first submit an operator measured: a cold engine takes as
+      // long as it takes, and a repo map is the least urgent thing here — it is
+      // orientation, not an answer to anything that was asked.
+      const hubs = await Promise.race([
+        graphEngine().hubs(undefined, 8),
+        new Promise<never[]>((r) => setTimeout(() => r([]), Math.min(settings.hookBudgetMs, 1_000))),
+      ]);
       if (!hubs.length) return undefined;
       trace("repo map", hubs.length);
       return `[code-lens — where the weight sits in ${cwd.split("/").pop()}]\n` +
@@ -834,6 +887,24 @@ export default function piCodeLens(pi: ExtensionAPI) {
     if (q.length < MIN_PROMPT_CHARS) { trace("prompt: too short", q); return undefined; }
     const state = freshness(cwd).state;
     if (state === "unindexed") { trace("prompt: unindexed", cwd); return undefined; }
+    // Never queue behind a rebuild on a person's time. The stall an operator
+    // measured was the engine REINDEXING: sockets to it opened a second into the
+    // wait and stayed open, while this process used 240 ms of CPU across 7.1 s
+    // and slept through 103 of 107 samples. It was not working; it was waiting,
+    // in a hook where somebody is watching the cursor.
+    // Skip only when the STRUCTURAL engine is rebuilding — that is the one this
+    // hook waits on, and the one an operator caught holding sockets open for
+    // seconds while this process slept. A semantic pass is a different program:
+    // measured with `ccc index` genuinely running, the same questions answered
+    // in 372 ms and 481 ms. Muting the channel for it would trade a real answer
+    // for a saving nobody needed.
+    //
+    // LENS_TEST_NO_PASS lets a test state that nothing is indexing. Without it
+    // this reads the real machine, so a suite running during a genuine rebuild
+    // asserts against a tool that is correctly staying quiet — a red test
+    // proving the feature works.
+    const pass = process.env.LENS_TEST_NO_PASS ? null : indexRunning();
+    if (pass?.startsWith("graph")) { trace("prompt: skipped", `${pass} pass in flight`); return undefined; }
     try {
       const answer = await answerFor(q, cwd, settings.timeoutMs, settings.budgetTokens);
       if (!answer) {
@@ -900,7 +971,15 @@ export default function piCodeLens(pi: ExtensionAPI) {
         // imports it. A large share of what agents search for is module-shaped
         // — `actuator`, `file-lock`, `lane-bar` — and those met silence from an
         // index holding 1,671 import edges nobody asked about.
-        const importers = await new GraphEngine().importersOf(subject, undefined, 5);
+        //
+        // INSIDE the deadline. This ran after the timeout race that was supposed
+        // to bound it, so a subject the engine was slow about spent the whole
+        // budget on the race and then waited again, unbounded, on this call —
+        // measured as seconds of a person's time, in a hook that promised none.
+        const importers = await Promise.race([
+          graphEngine().importersOf(subject, undefined, 5),
+          new Promise<string[]>((r) => setTimeout(() => r([]), Math.max(250, Math.min(budgetMs, 1_500)))),
+        ]);
         if (importers.length) {
           answered.set(key, Date.now());
           return {
@@ -937,7 +1016,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const top = structural[0]!;
       let file = top.file, line = top.line;
       if (!line || !file.includes("/")) {
-        const at = await new GraphEngine().locate(top.symbol ?? subject);
+        const at = await graphEngine().locate(top.symbol ?? subject);
         if (at) { file = at.file; line = at.line; }
       }
       const lifted = crux(file, line, cwd);
@@ -961,6 +1040,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
     setTimeout(() => {
       const f = freshness(ctx.cwd);
       if (f.state === "stale") void runRefresh(ctx, `${f.behind} commit${f.behind === 1 ? "" : "s"} behind`);
+      // Open the graph session NOW, on nobody's clock. Measured: the answer
+      // itself takes 80 ms, while the first call on a new session pays a
+      // 2,756 ms handshake — so the entire prompt-hook budget was being spent on
+      // protocol the first time anyone asked anything, which is exactly the
+      // 51.9 s first submit an operator caught, and why every later pack still
+      // missed a 400 ms wall. The cost is unavoidable; being charged for it at
+      // the moment a person presses enter is not.
+      void graphEngine().locate("main").catch(() => { /* warming only */ });
     }, 2_000);
   });
 
