@@ -24,7 +24,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * Files whose bytes moved since the index was written — the drift a commit count
@@ -92,8 +92,11 @@ export function healIfStale(
   inFlight++;
   try {
     const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
+    // Only the repository that was read. Without `--repo` the refresh walks
+    // every registered repository, so one stale index made the machine re-check
+    // all fifteen — launching the engine for each of them — to heal one.
     const child = (hooks.spawnFn ?? spawn)(
-      process.execPath, [cli, 'refresh', '--graph-only'],
+      process.execPath, [cli, 'refresh', '--graph-only', '--repo', basename(cwd)],
       { cwd, detached: true, stdio: 'ignore' },
     );
     child.on?.('exit', () => { inFlight--; });
