@@ -35,7 +35,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { GraphEngine } from '../engines/graph.js';
-import { searchSubject } from '../core/augment.js';
+import { promptSubjects, searchSubject } from '../core/augment.js';
 
 /** Sessions pi keeps for a checkout: the absolute path, `/` → `-`, fenced by `--`. */
 export function sessionDirFor(repoDir: string, home = homedir()): string {
@@ -55,6 +55,13 @@ export interface Kpi {
   byAnswer: number;
   byTool: number;
   nudged: number;
+  /** Every lens tool call the agent made of its own accord. `byTool` counts
+   *  only the ones that followed a search on the same subject, so a lens call
+   *  made INSTEAD of searching — the case adoption is about — was invisible:
+   *  the report said 0 while the transcripts held 4. */
+  lensChosen: number;
+  /** Packs delivered on prompts that named no code the graph knows. */
+  packsUnasked: number;
   /** Why the unserved moments went unserved. A KPI that reports only a
    *  percentage sends the reader to write their own script, and two scripts
    *  disagreeing about the same hour is how a day gets lost. */
@@ -119,6 +126,7 @@ export async function kpi(
       edit: { happened: 0, addressable: 0, served: 0 },
     },
     byAnswer: 0, byTool: 0, nudged: 0, recentlyTold: 0, misses: [], sessions: 0,
+    lensChosen: 0, packsUnasked: 0,
     why: {},
     scope: o.sessions?.length ? `${o.sessions.length} named session(s)` : undefined,
   };
@@ -146,8 +154,17 @@ export async function kpi(
       if (!t || t < since) continue;
       if (x.type === 'custom_message') {
         const m = x.message ?? x;
-        if ((m.customType ?? x.customType) === 'code-lens-context')
-          ev.push({ t, kind: /no strong structural match/.test(String(m.content)) ? 'nudge' : 'pack' });
+        if ((m.customType ?? x.customType) === 'code-lens-context') {
+          // Classified by what the message CARRIES, in every wording the hook
+          // has used. Recognising only the first nudge wording meant every later
+          // nudge — and every message carrying nothing but the repository map —
+          // was scored as a served answer.
+          const c = String(m.content);
+          const kind = /already knows about this task/.test(c) ? 'pack'
+            : /no strong structural match|nothing strong matched/.test(c) ? 'nudge'
+            : 'map';
+          ev.push({ t, kind });
+        }
         continue;
       }
       if (x.type !== 'message') continue;
@@ -160,6 +177,7 @@ export async function kpi(
           if (c.type !== 'toolCall') continue;
           const a = c.arguments ?? {};
           if (String(c.name).startsWith('lens_')) {
+            K.lensChosen++;
             ev.push({ t, kind: 'lens', subject: String(a.symbol ?? a.question ?? '').toLowerCase() });
           } else if (c.name === 'edit' || c.name === 'write') {
             ev.push({ t, kind: 'edit', path: String(a.path ?? '') });
@@ -205,11 +223,14 @@ export async function kpi(
         K.moments.prompt.happened++;
         const near = ev.slice(i, i + 3);
         const packed = near.some((x) => x.kind === 'pack');
-        const words = [...new Set(e.text!.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) ?? [])]
-          .filter((w) => /[a-z][A-Z]|_/.test(w));
-        // A pack that WAS served proves the prompt was addressable — the live
-        // gate judges this better than any word rule written here, so it wins.
-        if (!packed && !words.some((w) => known.has(w.toLowerCase()))) continue;
+        // Answerable means the prompt NAMES code the graph knows — judged with the
+        // hook's own extractor, and never by whether a pack arrived. Letting a
+        // served pack prove the prompt was answerable put every success in the
+        // denominator too, so the row read 81-100% while the channel delivered
+        // one pack in three hours.
+        const named = promptSubjects(e.text!, 5)
+          .some((w) => known.has(w.toLowerCase()) || imported.has(w.toLowerCase()));
+        if (!named) { if (packed) K.packsUnasked++; continue; }
         K.moments.prompt.addressable++;
         if (packed) K.moments.prompt.served++;
         else if (near.some((x) => x.kind === 'nudge')) { K.nudged++; bump(K, 'prompt: nudged, not answered'); }
@@ -269,7 +290,15 @@ function render(K: Kpi, hours: number): void {
   // were granted. Reporting them as one total hid that the second is near zero.
   console.log(`\n  answered on the agent's own search:      ${K.byAnswer}`);
   console.log(`  answered up front, from the prompt:      ${K.moments.prompt.served}`);
-  console.log(`  because an agent chose a lens tool:      ${K.byTool}`);
+  // The usage mix, as Graft scores it per session (graft reads against source
+  // reads): of the code searches the agent chose to run, how many went to a
+  // lens tool. This is the adoption number; the rows above are delivery.
+  const searched = K.moments.search.happened;
+  const mix = K.lensChosen + searched;
+  console.log(`\n  agent's own choice — lens tools: ${K.lensChosen} · grep/rg/read for code: ${searched}` +
+              (mix ? `  (${(K.lensChosen / mix * 100).toFixed(1)}% lens)` : ''));
+  if (K.byTool) console.log(`    of the lens calls, ${K.byTool} directly replaced a search on the same subject`);
+  if (K.packsUnasked) console.log(`  packs on prompts that named no known code: ${K.packsUnasked} (not counted as served)`);
   if (K.nudged) console.log(`  prompts nudged instead of answered:      ${K.nudged}`);
   if (K.recentlyTold)
     console.log(`  held back — same answer given <30 min ago:  ${K.recentlyTold}` +

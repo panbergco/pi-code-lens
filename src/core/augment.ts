@@ -255,7 +255,10 @@ export function promptSubjects(prompt: string, max = 2): string[] {
   for (const m of prompt.matchAll(/`([^`\n]{3,80})`/g)) {
     const inner = m[1]!.trim();
     const path = /[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/.exec(inner);
-    keep(path ? symbolFromPath(path[0]) : (/^[A-Za-z_][\w]*$/.test(inner) ? inner : null));
+    // Hyphens included: a module named `lane-mint` is exactly what people
+    // backtick, and the identifier-only rule dropped it (found by the KPI's own
+    // test, which the graph answers with that file's importers).
+    keep(path ? symbolFromPath(path[0]) : (/^[A-Za-z_][\w-]*$/.test(inner) ? inner : null));
   }
   for (const m of prompt.matchAll(/[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/g)) keep(symbolFromPath(m[0]));
   for (const m of prompt.matchAll(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g)) {
