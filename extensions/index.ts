@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
-import { foundNothing, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
+import { foundNothing, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
 import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
@@ -264,6 +264,29 @@ const estimateTokens = (text: string) => Math.ceil(text.length / 4);
  */
 let sharedGraph: GraphEngine | undefined;
 const graphEngine = () => (sharedGraph ??= new GraphEngine());
+/**
+ * The graph engine's name for the repository a SESSION is in.
+ *
+ * Every direct lookup used to default to `process.cwd()`, which is only the
+ * session's repository by coincidence. When they differ, the lookup quietly
+ * asks another repository's index and finds nothing — caught when a pack for a
+ * function with 3 callers arrived with no location and no code, because the
+ * location was looked up in the wrong index.
+ */
+//
+// Remembered per directory for the session: the answer does not change, and
+// resolving it asks the engine for its repository list, which is cached for a
+// minute — so without this, one prompt a minute would pay that round trip
+// inside a 400 ms wall. Only a resolved name is remembered; "not indexed" is
+// asked again, since an index can appear mid-session.
+const repoNames = new Map<string, string>();
+const repoOf = async (cwd: string): Promise<string | undefined> => {
+  const known = repoNames.get(cwd);
+  if (known) return known;
+  const repo = (await graphEngine().repoArg(cwd)).repo as string | undefined;
+  if (repo) repoNames.set(cwd, repo);
+  return repo;
+};
 
 const DEAD_END_TTL_MS = 10 * 60_000; // the index changes; a miss is not permanent
 /**
@@ -648,13 +671,19 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // the pack answers in 120-290 ms while the map's first call pays ~400 ms to
     // open its own engine session.
     const wall = Date.now() + settings.hookBudgetMs;
-    const byWall = <T>(p: Promise<T>, what: string) => Promise.race([
-      p,
-      new Promise<undefined>((r) => setTimeout(() => {
-        trace("hook deadline", `${what} missed ${settings.hookBudgetMs}ms — turn starts without it`);
-        r(undefined);
-      }, Math.max(1, wall - Date.now()))),
-    ]);
+    // The timer is cleared when the piece finishes first. Left running, it fired
+    // anyway and logged "missed 400ms" for work that had finished in 5 ms — a
+    // trace that blamed the deadline for silences it did not cause.
+    const byWall = <T>(p: Promise<T>, what: string) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        p.finally(() => clearTimeout(timer)),
+        new Promise<undefined>((r) => { timer = setTimeout(() => {
+          trace("hook deadline", `${what} missed ${settings.hookBudgetMs}ms — turn starts without it`);
+          r(undefined);
+        }, Math.max(1, wall - Date.now())); }),
+      ]);
+    };
     const [pack, map] = await Promise.all([
       byWall(promptPack(event.prompt, ctx.cwd), "pack"),
       byWall(repoMap(ctx.cwd), "repo map"),
@@ -734,7 +763,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // and about the file otherwise.
     let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
     if (!answer) {
-      const importers = await graphEngine().importersOf(symbol, undefined, 6);
+      const importers = await graphEngine().importersOf(symbol, await repoOf(ctx.cwd), 6);
       if (!importers.length) return;   // nothing depends on it: nothing to warn about
       answer = {
         subject: symbol,
@@ -871,7 +900,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       // long as it takes, and a repo map is the least urgent thing here — it is
       // orientation, not an answer to anything that was asked.
       const hubs = await Promise.race([
-        graphEngine().hubs(undefined, 8),
+        repoOf(cwd).then((repo) => graphEngine().hubs(repo, 8)),
         new Promise<never[]>((r) => setTimeout(() => r([]), Math.min(settings.hookBudgetMs, 1_000))),
       ]);
       if (!hubs.length) return undefined;
@@ -913,8 +942,18 @@ export default function piCodeLens(pi: ExtensionAPI) {
       trace("prompt: skipped", "this repository's graph is being rebuilt");
       return undefined;
     }
+    // Ask only about what the prompt names as CODE. The whole prompt, asked as
+    // a question, routes prose to recall-plus-structure at 430-550 ms, and the
+    // wall is 400: six real prompts replayed, six misses, one pack in three
+    // hours. A named symbol takes the structural path alone at ~212 ms.
+    const subjects = promptSubjects(q, 2);
+    if (!subjects.length) { trace("prompt: names no code", q.slice(0, 60)); return undefined; }
     try {
-      const answer = await answerFor(q, cwd, settings.timeoutMs, settings.budgetTokens);
+      let answer: Awaited<ReturnType<typeof answerFor>>;
+      for (const s of subjects) {
+        answer = await answerFor(s, cwd, settings.timeoutMs, settings.budgetTokens);
+        if (answer) break;
+      }
       if (!answer) {
         // Silence is not free. Graft measured the alternative: assuming the agent
         // would reach for the tool on its own, it grepped 38 times instead. Say
@@ -985,7 +1024,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
         // budget on the race and then waited again, unbounded, on this call —
         // measured as seconds of a person's time, in a hook that promised none.
         const importers = await Promise.race([
-          graphEngine().importersOf(subject, undefined, 5),
+          repoOf(cwd).then((repo) => graphEngine().importersOf(subject, repo, 5)),
           new Promise<string[]>((r) => setTimeout(() => r([]), Math.max(250, Math.min(budgetMs, 1_500)))),
         ]);
         if (importers.length) {
@@ -1024,7 +1063,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const top = structural[0]!;
       let file = top.file, line = top.line;
       if (!line || !file.includes("/")) {
-        const at = await graphEngine().locate(top.symbol ?? subject);
+        const at = await graphEngine().locate(top.symbol ?? subject, await repoOf(cwd));
         if (at) { file = at.file; line = at.line; }
       }
       const lifted = crux(file, line, cwd);
@@ -1065,7 +1104,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       // 51.9 s first submit an operator caught, and why every later pack still
       // missed a 400 ms wall. The cost is unavoidable; being charged for it at
       // the moment a person presses enter is not.
-      void graphEngine().locate("main").catch(() => { /* warming only */ });
+      void repoOf(ctx.cwd).then((repo) => graphEngine().locate("main", repo)).catch(() => { /* warming only */ });
     }, 2_000);
   });
 

@@ -148,6 +148,8 @@ export class GraphEngine implements Engine {
    * a minute. Diagnostics call `health()` directly and always see live state.
    */
   private cachedHealth: { at: number; value: Health } | null = null;
+  /** One background renewal at a time. */
+  private renewing: Promise<void> | undefined;
 
   /**
    * Resolve the `repo` argument the graph engine wants from a working directory.
@@ -173,6 +175,18 @@ export class GraphEngine implements Engine {
     if (this.cachedHealth && Date.now() - this.cachedHealth.at < maxAgeMs) {
       return this.cachedHealth.value;
     }
+    // Past its age, a good answer is still served — and renewed behind it.
+    // `list_repos` measured ~3 s on every call, so an expiring cache charged
+    // those 3 s to whichever question arrived first each minute. Inside the
+    // prompt hook that is a person's wait and a missed 400 ms wall, once a
+    // minute, for a list that had not changed. Only a cold start waits.
+    if (this.cachedHealth) {
+      this.renewing ??= this.health()
+        .then((v) => { if (v.up && !v.partial) this.cachedHealth = { at: Date.now(), value: v }; })
+        .catch(() => { /* the served answer stands until a renewal succeeds */ })
+        .finally(() => { this.renewing = undefined; });
+      return this.cachedHealth.value;
+    }
     const value = await this.health();
     // Only cache a GOOD answer: caching "engine down" would keep reporting an
     // outage for a minute after it recovered.
@@ -194,7 +208,13 @@ export class GraphEngine implements Engine {
       try {
         const r = GraphEngine.unwrap(await this.rpc('tools/call',
           { name: 'list_repos', arguments: {} }, 20_000));
-        const list = Array.isArray(r) ? r : (r?.repos ?? r?.repositories ?? []);
+        const list = Array.isArray(r) ? r : (r?.repos ?? r?.repositories);
+        // Anything that is not a list is an answer we could not read — an error
+        // the engine wrote as text, say — not a list with nothing in it. Taken as
+        // empty, it was cached as "up, no repositories" and every answer for the
+        // next minute said "no index": seen straight after a server restart, for
+        // a repository whose callers the same engine returned a minute later.
+        if (!Array.isArray(list)) throw new Error('unreadable repository list');
         repos = list.map((x: any) => (typeof x === 'string' ? x : x?.name ?? x?.label)).filter(Boolean);
       } catch { partial = true; /* the tool list already proves liveness; the repo list is unknown, not empty */ }
       return { id: this.id, up: true, repos, detail: `${tools.length} tools`, ...(partial ? { partial } : {}) };
