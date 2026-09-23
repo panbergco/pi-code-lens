@@ -150,6 +150,7 @@ assert.equal(searchSubject('bash', { command: 'cd /repo && rg -n "parseRoadmap" 
   assert.deepEqual(promptSubjects('where is sprint_n set?'), ['sprint_n'], 'so is snake_case');
   assert.deepEqual(promptSubjects('look at packages/core/src/lane-mint.ts'), ['lane-mint'], 'and a source path names its file');
   assert.deepEqual(promptSubjects('explain `tick` in detail'), ['tick'], 'backticks mark code even when the word is plain');
+  assert.deepEqual(promptSubjects('look at `lane-mint` please'), ['lane-mint'], 'including a module name with a hyphen');
   assert.deepEqual(promptSubjects('fix fooBar, then barBaz, then bazQux'), ['fooBar', 'barBaz'], 'at most two, in order');
   assert.deepEqual(promptSubjects('fooBar and FOOBAR and fooBar again'), ['fooBar'], 'each once');
 }
