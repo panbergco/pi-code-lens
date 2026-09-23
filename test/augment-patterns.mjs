@@ -122,7 +122,7 @@ console.log('ok — a search is answered only when there is a real subject and s
 // The distinction is what feeds the pipe: a LISTING is still the codebase.
 assert.equal(searchSubject('bash', { command: 'node main.js suite npx vitest run x.test.ts 2>&1 | grep -E "verdict|FAIL"' }),
   null, 'filtering a test run is not a question about code');
-assert.equal(searchSubject('bash', { command: 'pisg query "select * from findings" | grep -c verdict' }),
+assert.equal(searchSubject('bash', { command: 'mytool query "select * from findings" | grep -c verdict' }),
   null, 'counting rows in query output is not a question about code');
 assert.equal(searchSubject('bash', { command: 'ls packages | grep premiseVerdicts' }),
   'premiseVerdicts', 'but filtering a file listing still asks where something lives');
