@@ -191,6 +191,9 @@ assert.equal(minGapMs(), 0, 'a repo never measured is due now');
   assert.equal(spawned.length, 1, 'exactly one rebuild is started');
   assert.ok(spawned[0].args.includes('--graph-only'),
     'and only the cheap engine — an auto-rebuild must never spend the expensive one');
+  const repoFlag = spawned[0].args.indexOf('--repo');
+  assert.ok(repoFlag > 0 && spawned[0].args[repoFlag + 1] === 'repo',
+    'and only the repository that was read — without --repo it walked all fifteen to heal one');
 
   healIfStale('/repo', 99, { now: at(1), spawnFn });
   assert.equal(spawned.length, 1, 'a second question a minute later does not queue a second pass');
@@ -260,6 +263,43 @@ assert.equal(minGapMs(), 0, 'a repo never measured is due now');
   rmSync(mine, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
 }
 console.log('ok — layers read from metadata, and a rebuild only mutes its own repository');
+
+// ── "already up to date" is decided here, by the engine's own rule ──────────
+// A refresh launched the engine for every registered repository to hear
+// "already up to date" — ~2 s each, fifteen repositories, most of a 2-4 minute
+// cycle. The rule is copied from the engine, so it may only ever skip what the
+// engine itself would have skipped: checked against the engine on 8 of 8.
+{
+  const { graphUpToDate } = await import('../dist/commands/refresh.js');
+  const dir = mkdtempSync(join(tmpdir(), 'lens-uptodate-'));
+  const git = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
+  writeFileSync(join(dir, 'a.ts'), 'export const a = 1;\n');
+  git('add', '.'); git('commit', '-qm', 'one');
+  mkdirSync(join(dir, '.gitnexus'), { recursive: true });
+  const meta = (m) => writeFileSync(join(dir, '.gitnexus', 'meta.json'), JSON.stringify(m));
+
+  meta({ lastCommit: git('rev-parse', 'HEAD') });
+  assert.equal(graphUpToDate(dir), true, 'indexed commit is HEAD and the tree is clean: nothing to launch');
+  writeFileSync(join(dir, 'AGENTS.md'), 'stats the engine rewrote');
+  assert.equal(graphUpToDate(dir), true, 'files the engine writes itself do not count as dirty');
+
+  writeFileSync(join(dir, 'a.ts'), 'export const a = 2;\n');
+  assert.equal(graphUpToDate(dir), false, 'an uncommitted edit still reaches the index');
+  git('checkout', '-q', '--', 'a.ts');
+  writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+  assert.equal(graphUpToDate(dir), false, 'so does a new untracked file');
+  rmSync(join(dir, 'b.ts'));
+
+  git('commit', '-q', '--allow-empty', '-m', 'two');
+  assert.equal(graphUpToDate(dir), false, 'a new commit needs the engine');
+  meta({ lastCommit: git('rev-parse', 'HEAD'), embeddingCheckpoint: { batch: 3 } });
+  assert.equal(graphUpToDate(dir), false, 'an unfinished embedding pass is never skipped');
+  rmSync(join(dir, '.gitnexus', 'meta.json'));
+  assert.equal(graphUpToDate(dir), false, 'and without metadata the engine decides, as it always did');
+  rmSync(dir, { recursive: true, force: true });
+}
+console.log('ok — the engine is launched only when its own rule says there is work');
 
 // The graph engine keeps its connection alive and exposes no way to close it;
 // the refresh command exits the process instead. Do the same rather than hang.

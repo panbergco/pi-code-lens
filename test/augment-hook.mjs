@@ -274,3 +274,35 @@ console.log('ok — an edited symbol arrives with its dependents, once');
 }
 
 console.log('ok — a slow index delays the turn by a deadline, never by an engine');
+
+
+// ── starting or reloading a session does not rebuild a repo a commit behind ─
+// session_start fires on every start AND every /reload, and it used to launch a
+// FULL refresh whenever the index was even one commit behind — which a busy
+// repository always is. Watched in the act: one session start, one 60-second
+// rebuild of the repository every other agent was querying. It now goes through
+// the same gate as a stale read: several commits behind, graph only, one at a time.
+{
+  const { execFileSync } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'lens-start-'));
+  const git = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
+  git('commit', '-q', '--allow-empty', '-m', 'indexed');
+  mkdirSync(join(dir, '.gitnexus'), { recursive: true });
+  writeFileSync(join(dir, '.gitnexus', 'meta.json'),
+    JSON.stringify({ lastCommit: git('rev-parse', 'HEAD'), indexedAt: new Date().toISOString() }));
+  const statuses = [];
+  const startCtx = { cwd: dir, mode: 'tui', ui: { notify() {}, setStatus: (_k, v) => statuses.push(String(v)) } };
+
+  git('commit', '-q', '--allow-empty', '-m', 'one more');           // one commit behind
+  await handlers.session_start({ reason: 'reload' }, startCtx);
+  await new Promise((r) => setTimeout(r, 2_600));
+  assert.ok(!statuses.some((v) => /reindex/.test(v)), `one commit behind starts no rebuild (saw: ${statuses.join(' | ')})`);
+
+  for (let i = 0; i < 5; i++) git('commit', '-q', '--allow-empty', '-m', `c${i}`);   // six behind
+  await handlers.session_start({ reason: 'startup' }, startCtx);
+  await new Promise((r) => setTimeout(r, 2_600));
+  assert.ok(statuses.some((v) => /reindex/.test(v)), 'several commits behind still heals');
+  rmSync(dir, { recursive: true, force: true });
+}
+console.log('ok — a session start or reload no longer rebuilds a repository one commit behind');

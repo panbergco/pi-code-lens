@@ -50,6 +50,7 @@ import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
 import { askViaServer, serverUp } from "../src/server/client.js";
 import { graphRebuildingHere, refresh } from "../src/commands/refresh.js";
+import { healIfStale } from "../src/core/heal.js";
 import { GraphEngine } from "../src/engines/graph.js";
 import { doctor } from "../src/commands/doctor.js";
 import { kpi } from "../src/commands/kpi.js";
@@ -1045,8 +1046,18 @@ export default function piCodeLens(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     setTimeout(() => {
+      // Through the same gate as a stale read: several commits behind, a
+      // cooldown, one pass at a time, graph only. This used to start a FULL
+      // refresh (both engines, control-flow layer included) whenever the index
+      // was even one commit behind — and session_start fires on every /reload
+      // too. A busy repository is always a commit behind; watched in the act,
+      // a single session start launched a 60-second rebuild of the repository
+      // that every other agent in it was querying at that moment.
       const f = freshness(ctx.cwd);
-      if (f.state === "stale") void runRefresh(ctx, `${f.behind} commit${f.behind === 1 ? "" : "s"} behind`);
+      if (f.state === "stale") {
+        const why = healIfStale(ctx.cwd, f.behind);
+        if (why) ctx.ui.setStatus("lens", `⟳ lens reindex (${why.split(" — ")[0]})`);
+      }
       // Open the graph session NOW, on nobody's clock. Measured: the answer
       // itself takes 80 ms, while the first call on a new session pays a
       // 2,756 ms handshake — so the entire prompt-hook budget was being spent on
