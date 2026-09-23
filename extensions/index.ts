@@ -49,7 +49,7 @@ import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
 import { askViaServer, serverUp } from "../src/server/client.js";
-import { indexRunning, refresh } from "../src/commands/refresh.js";
+import { graphRebuildingHere, refresh } from "../src/commands/refresh.js";
 import { GraphEngine } from "../src/engines/graph.js";
 import { doctor } from "../src/commands/doctor.js";
 import { kpi } from "../src/commands/kpi.js";
@@ -899,12 +899,19 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // in 372 ms and 481 ms. Muting the channel for it would trade a real answer
     // for a saving nobody needed.
     //
+    // And only a rebuild of THIS repository. A pass on any other repository
+    // leaves this one's queries untouched (measured: 4 ms median while another
+    // was rebuilt), yet the machine-wide check muted this channel whenever the
+    // refresh walked its fifteen repositories — 73% of one sampled minute.
+    //
     // LENS_TEST_NO_PASS lets a test state that nothing is indexing. Without it
     // this reads the real machine, so a suite running during a genuine rebuild
     // asserts against a tool that is correctly staying quiet — a red test
     // proving the feature works.
-    const pass = process.env.LENS_TEST_NO_PASS ? null : indexRunning();
-    if (pass?.startsWith("graph")) { trace("prompt: skipped", `${pass} pass in flight`); return undefined; }
+    if (!process.env.LENS_TEST_NO_PASS && graphRebuildingHere(cwd)) {
+      trace("prompt: skipped", "this repository's graph is being rebuilt");
+      return undefined;
+    }
     try {
       const answer = await answerFor(q, cwd, settings.timeoutMs, settings.budgetTokens);
       if (!answer) {

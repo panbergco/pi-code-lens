@@ -90,3 +90,36 @@ console.log('ok — graph engine recovers from an expired session');
 }
 
 console.log('ok — sessions are returned, so a loop of queries cannot exhaust the engine');
+
+
+// ── a repository list that failed to load is unknown, not empty ─────────────
+// Cached as "up, no repositories", one failed listing during a busy moment made
+// every answer for the next minute say the engine had no index — measured right
+// after a restart, for a repository with 24 callers on record.
+{
+  let listCalls = 0;
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const msg = JSON.parse(body || '{}');
+      if (msg.method === 'initialize') { res.setHeader('mcp-session-id', 'h'); return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} })); }
+      if (msg.method === 'notifications/initialized') return res.end('{}');
+      if (msg.method === 'tools/list') return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'list_repos' }] } }));
+      // First listing fails the way a busy engine does; later ones succeed.
+      if (++listCalls === 1) return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { message: 'busy' } }));
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id,
+        result: { content: [{ type: 'text', text: JSON.stringify(['alpha', 'beta']) }] } }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const e = new GraphEngine(`http://127.0.0.1:${srv.address().port}/mcp`);
+  const first = await e.healthCached();
+  assert.equal(first.up, true, 'the engine is up');
+  assert.equal(first.partial, true, 'but its repository list is unknown, and says so');
+  const second = await e.healthCached();
+  assert.deepEqual(second.repos, ['alpha', 'beta'], 'so the next question asks again instead of reusing "none"');
+  await GraphEngine.closeAll();
+  srv.close();
+}
+console.log('ok — a failed repository listing is never cached as "no index"');
