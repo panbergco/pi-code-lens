@@ -39,7 +39,7 @@ assert.equal(
 
 assert.equal(
   pick([
-    { uid: 'Const:proof/sprint-822/producer.mjs:tick', kind: 'Const', filePath: 'pisg-proof/sprint-822/producer.mjs', score: 0.5 },
+    { uid: 'Const:proof/run-822/producer.mjs:tick', kind: 'Const', filePath: 'run-proof/run-822/producer.mjs', score: 0.5 },
     { uid: 'Method:src/engine.ts:tick', kind: 'Method', filePath: 'packages/core/src/engine.ts', score: 0.5 },
   ]),
   'Method:src/engine.ts:tick',

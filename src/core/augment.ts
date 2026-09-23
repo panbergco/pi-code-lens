@@ -173,7 +173,7 @@ function subjectFromShell(command: string): { subject: string; origin: 'pattern'
     const token = tokens[i]!;
     // A grep AFTER a pipe is filtering command OUTPUT, not searching code:
     //   `vitest run x.test.ts | grep -E "verdict|FAIL"` asks about a test run,
-    //   `pisg query … | grep -c verdict` counts rows.
+    //   `mytool query … | grep -c verdict` counts rows.
     // Both were read as questions about the symbol `verdict`, and answered with
     // its callers — context spent on something nobody asked. They also inflated
     // the effectiveness denominator, which is how a busy repo looked like it was
