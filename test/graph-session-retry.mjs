@@ -106,8 +106,11 @@ console.log('ok — sessions are returned, so a loop of queries cannot exhaust t
       if (msg.method === 'initialize') { res.setHeader('mcp-session-id', 'h'); return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} })); }
       if (msg.method === 'notifications/initialized') return res.end('{}');
       if (msg.method === 'tools/list') return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'list_repos' }] } }));
-      // First listing fails the way a busy engine does; later ones succeed.
+      // The first listing fails the way a busy engine does; the second comes
+      // back as prose the engine wrote instead of a list; later ones succeed.
       if (++listCalls === 1) return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { message: 'busy' } }));
+      if (listCalls === 2) return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id,
+        result: { isError: true, content: [{ type: 'text', text: 'registry is being rewritten, try again' }] } }));
       res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id,
         result: { content: [{ type: 'text', text: JSON.stringify(['alpha', 'beta']) }] } }));
     });
@@ -117,9 +120,49 @@ console.log('ok — sessions are returned, so a loop of queries cannot exhaust t
   const first = await e.healthCached();
   assert.equal(first.up, true, 'the engine is up');
   assert.equal(first.partial, true, 'but its repository list is unknown, and says so');
-  const second = await e.healthCached();
-  assert.deepEqual(second.repos, ['alpha', 'beta'], 'so the next question asks again instead of reusing "none"');
+  const prose = await e.healthCached();
+  assert.equal(prose.partial, true, 'a reply that is not a list is unknown too, never an empty list');
+  const third = await e.healthCached();
+  assert.deepEqual(third.repos, ['alpha', 'beta'], 'so the next question asks again instead of reusing "none"');
   await GraphEngine.closeAll();
   srv.close();
 }
 console.log('ok — a failed repository listing is never cached as "no index"');
+
+// ── an expiring health check is renewed behind the answer, not in front of it ─
+// list_repos measured ~3 s on every call. With a plain expiring cache, the first
+// question each minute paid those 3 s — inside the prompt hook, a person's wait
+// and a missed 400 ms wall, for a list that had not changed.
+{
+  let lists = 0;
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', async () => {
+      const msg = JSON.parse(body || '{}');
+      if (msg.method === 'initialize') { res.setHeader('mcp-session-id', 'r'); return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} })); }
+      if (msg.method === 'notifications/initialized') return res.end('{}');
+      if (msg.method === 'tools/list') return res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'list_repos' }] } }));
+      lists++;
+      await new Promise((r) => setTimeout(r, 400));                  // a slow listing
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id,
+        result: { content: [{ type: 'text', text: JSON.stringify([`repo${lists}`]) }] } }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const e = new GraphEngine(`http://127.0.0.1:${srv.address().port}/mcp`);
+  const cold = await e.healthCached();
+  assert.deepEqual(cold.repos, ['repo1'], 'a cold start has nothing to serve, so it waits');
+
+  const t0 = Date.now();
+  const stale = await e.healthCached(0);                              // aged out
+  assert.ok(Date.now() - t0 < 150, `an aged answer is served at once (${Date.now() - t0}ms), not after a 400 ms listing`);
+  assert.deepEqual(stale.repos, ['repo1'], 'the last good answer is what gets served');
+  await e.healthCached(0);                                            // while one renewal is in flight
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(lists, 2, 'and exactly one renewal ran behind it, however often it was asked');
+  assert.deepEqual((await e.healthCached()).repos, ['repo2'], 'which replaced the served answer when it landed');
+  await GraphEngine.closeAll();
+  srv.close();
+}
+console.log('ok — an aging health check is renewed behind the answer, never in front of it');
