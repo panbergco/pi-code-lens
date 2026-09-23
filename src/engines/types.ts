@@ -44,6 +44,9 @@ export interface Health {
   id: EngineId;
   /** The engine answered a real probe — not merely "the binary exists". */
   up: boolean;
+  /** Up, but part of the answer failed to load (e.g. the repository list), so
+   *  `repos` is unknown rather than empty and must not be cached as fact. */
+  partial?: boolean;
   version?: string;
   model?: string;
   device?: string;
