@@ -134,3 +134,23 @@ assert.equal(searchSubject('bash', { command: 'date; cd /repo; grep -rn "archive
   'archiveSprint', 'a search after a sequence separator is still a search');
 assert.equal(searchSubject('bash', { command: 'cd /repo && rg -n "parseRoadmap" packages/core | head -3' }),
   'parseRoadmap', 'and piping its RESULTS into head changes nothing');
+
+
+// ── a prompt is asked about only what it names as code ──────────────────────
+// Six real prompts, replayed: asked whole, every one routed to the 430-550 ms
+// prose path and missed the prompt hook's 400 ms wall. A named symbol answers
+// in ~212 ms. Prose is what the agent's own lens_ask is for.
+{
+  const { promptSubjects } = await import('../dist/core/augment.js');
+  assert.deepEqual(promptSubjects('who needs to fix it? Queries against the database that take longer than 0.5 seconds'), [],
+    'prose names no code');
+  assert.deepEqual(promptSubjects('how long did that sprint take to close and which flow and stages'), [],
+    'and an English word that is also a symbol is not enough');
+  assert.deepEqual(promptSubjects('what calls reconcileCommit?'), ['reconcileCommit'], 'camelCase is code');
+  assert.deepEqual(promptSubjects('where is sprint_n set?'), ['sprint_n'], 'so is snake_case');
+  assert.deepEqual(promptSubjects('look at packages/core/src/lane-mint.ts'), ['lane-mint'], 'and a source path names its file');
+  assert.deepEqual(promptSubjects('explain `tick` in detail'), ['tick'], 'backticks mark code even when the word is plain');
+  assert.deepEqual(promptSubjects('fix fooBar, then barBaz, then bazQux'), ['fooBar', 'barBaz'], 'at most two, in order');
+  assert.deepEqual(promptSubjects('fooBar and FOOBAR and fooBar again'), ['fooBar'], 'each once');
+}
+console.log('ok — a prompt is asked about only the code it names');

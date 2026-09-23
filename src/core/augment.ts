@@ -230,6 +230,42 @@ export interface SubjectMemory { answered: Set<string>; unanswerable: Set<string
 export const MIN_OUTPUT_CHARS = 40;
 
 /**
+ * The names in a prompt that are unmistakably CODE, in the order they appear.
+ *
+ * The prompt hook has 400 ms, because a person is waiting on it. Asking the
+ * whole prompt as a question routes any prose to the full recall-plus-structure
+ * path, which measured 430-550 ms — so on real prompts the pack missed the wall
+ * six times out of six, and one landed in three hours of work. A bare symbol
+ * routes to the structural path alone and answers in ~212 ms. So the hook asks
+ * only about what the prompt names as code, and a prompt that names none gets
+ * no pack: prose retrieval is what the agent's own lens_ask is for.
+ *
+ * Code-shaped means: inside `backticks`, camelCase, snake_case, or a path with
+ * a source extension. A plain English word is never enough — "sprint" and
+ * "check" are also symbols, and a pack about them answers nothing asked.
+ */
+export function promptSubjects(prompt: string, max = 2): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const keep = (name: string | null) => {
+    if (!name || !isUsefulSubject(name) || seen.has(name.toLowerCase())) return;
+    seen.add(name.toLowerCase()); out.push(name);
+  };
+  // Backticks first: the writer marked these as code themselves.
+  for (const m of prompt.matchAll(/`([^`\n]{3,80})`/g)) {
+    const inner = m[1]!.trim();
+    const path = /[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/.exec(inner);
+    keep(path ? symbolFromPath(path[0]) : (/^[A-Za-z_][\w]*$/.test(inner) ? inner : null));
+  }
+  for (const m of prompt.matchAll(/[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/g)) keep(symbolFromPath(m[0]));
+  for (const m of prompt.matchAll(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g)) {
+    const w = m[0];
+    if (/[a-z][A-Z]/.test(w) || /[A-Za-z]_[A-Za-z]/.test(w)) keep(w);
+  }
+  return out.slice(0, max);
+}
+
+/**
  * A shell that broke, as opposed to a search that found nothing.
  *
  * The difference decides whether speaking is help or noise. `grep` exits 1 with

@@ -169,15 +169,25 @@ console.log('ok — the hook appends, remembers, obeys its toggle, and never hol
   const start = (prompt) => handlers.before_agent_start({ prompt, systemPrompt: 'You are a coding assistant.' }, ctx);
   const packOf = (r) => String(r?.message?.content ?? '');
 
+  // The hook asks only about what the prompt names as CODE: the whole prompt as
+  // a question routes prose to a 430-550 ms path, and the wall is 400 ms.
   reset();
   let r = await start('where does the lane grant get refused?');
+  assert.ok(!packOf(r).includes('already knows'), 'a prompt that names no code gets no pack');
+  // (The session's first turn still carries the repo map, whose graph calls go
+  // through the same stubbed network with no question — hence the filter.)
+  assert.deepEqual(calls.filter(Boolean), [], 'and asks the engines no question');
+
+  reset();
+  r = await start('where does writeLane refuse a grant?');
+  assert.deepEqual(calls.filter(Boolean), ['writeLane'], 'the engine is asked about the named symbol, not the sentence');
   assert.ok(packOf(r).includes('what the index already knows'), 'the prompt itself is answered up front');
   assert.ok(packOf(r).includes('writeLane'), 'and the pack names the spot');
   assert.ok(/do not grep for what is listed/.test(packOf(r)), 'with the one instruction that replaces the search');
 
   // Novelty: the same spot is not spent twice on the same session.
   reset();
-  r = await start('and where is the lane grant refused, again?');
+  r = await start('and where does writeLane refuse, again?');
   assert.equal(r?.message, undefined, 'a spot already shown is not re-injected');
 
   // Conversational turns cost nothing at all.
@@ -189,14 +199,14 @@ console.log('ok — the hook appends, remembers, obeys its toggle, and never hol
   // Nothing strong: say the useful thing, but only twice per session.
   reset();
   answer = null;
-  const a = await start('please refactor the entire billing subsystem now');
-  const b = await start('now do the same for the reporting subsystem too');
-  const c = await start('and then the notifications subsystem as well');
+  const a = await start('please refactor billingSubsystem now');
+  const b = await start('now do the same for reportingSubsystem too');
+  const c = await start('and then notificationSubsystem as well');
   // The nudge must carry the CALL, not just the news: a bare "no match" is an
   // apology, and Graft rewrote the same line after tracing a session where it
   // left the agent to grep 38 times.
   assert.ok(/nothing strong matched/.test(packOf(a)), 'a weak match says so, once');
-  assert.match(packOf(a), /lens_ask \{ question: "please refactor/, 'and names the exact call to make');
+  assert.match(packOf(a), /lens_ask \{ question: "please refactor billingSubsystem/, 'and names the exact call to make');
   assert.ok(/nothing strong matched/.test(packOf(b)), 'and twice');
   assert.equal(c?.message, undefined, 'but never becomes wallpaper');
 
