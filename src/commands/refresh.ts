@@ -169,6 +169,34 @@ export function layersFromMeta(dir: string): { pdg: boolean; embeddings: boolean
   } catch { return undefined; }
 }
 
+/**
+ * Would `gitnexus analyze` take its "already up to date" fast path here?
+ *
+ * The same rule, copied from the engine rather than approximated, so no case it
+ * would have indexed is ever skipped (run-analyze.js, "Early-return: already up
+ * to date"; the exclusions are storage/git.js `isWorkingTreeDirty`):
+ *   - the indexed commit is HEAD,
+ *   - no embedding pass is part-way through,
+ *   - the working tree is clean apart from files the engine writes itself.
+ * A dirty tree still launches the engine — that is how uncommitted edits reach
+ * the index. A folder without a commit is never "up to date", as upstream.
+ * Any doubt answers false, and the engine decides as it always did.
+ */
+export function graphUpToDate(dir: string): boolean {
+  let meta: any;
+  try { meta = JSON.parse(readFileSync(join(dir, '.gitnexus', 'meta.json'), 'utf8')); } catch { return false; }
+  if (!meta?.lastCommit || meta.embeddingCheckpoint) return false;
+  const git = (args: string[]) => execFileSync('git', args,
+    { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+  try {
+    if (git(['rev-parse', 'HEAD']).trim() !== meta.lastCommit) return false;
+    return git(['status', '--porcelain', '--', '.',
+      ':(exclude).gitnexus', ':(exclude).gitnexus/**', ':(exclude).claude', ':(exclude).claude/**',
+      ':(exclude).cursor', ':(exclude).cursor/**', ':(exclude)AGENTS.md', ':(exclude)CLAUDE.md',
+      ':(exclude).agents', ':(exclude).agents/**']).trim() === '';
+  } catch { return false; }
+}
+
 export function indexRunning(): string | null {
   // Anchored to the BINARY, not to a mention. An unanchored pattern matches any
   // process whose command line merely contains the words — a shell running
@@ -390,7 +418,13 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
         const waited = Date.now() - (st.graphAt ?? 0);
         const dueByCost = !st.graphAt || waited > gap;
 
-        if (!dueByCost && !scopeChanged) {
+        if (!scopeChanged && graphUpToDate(r.dir)) {
+          // Decided here, by the engine's own rule, instead of launching the
+          // engine to hear it. Each launch cost ~2 s and a refresh walks every
+          // registered repository, so a cycle spent most of its 2-4 minutes
+          // starting a CLI that answered "already up to date".
+          console.log('  graph: up to date — nothing to launch');
+        } else if (!dueByCost && !scopeChanged) {
           const mins = Math.max(1, Math.round((gap - waited) / 60_000));
           console.log(`  graph: deferred ~${mins} min — last rebuild took ` +
                       `${((st.graphMs ?? 0) / 1000).toFixed(0)}s and this engine has no delta`);
