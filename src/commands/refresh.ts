@@ -62,7 +62,7 @@ const HOUR_MS = 60 * 60_000;
 /**
  * How long this repo must wait between rebuilds, from what its last one cost.
  *
- * The rule used to be a cliff: over 60s, defer a full hour. a large monorepo
+ * The rule used to be a cliff: over 60s, defer a full hour. A large monorepo
  * measured 121s, so it sat 19-43 commits behind permanently — and after the
  * scope fix it measured 58.7s, which is the same cliff a second away in the
  * other direction. A threshold that decides an hour of staleness on a

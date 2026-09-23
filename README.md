@@ -167,7 +167,7 @@ says about itself: **of the moments the index could have answered, what share di
 
 ```
 $ lens kpi
-code-lens effectiveness — a large monorepo · last 72h · 38 session(s)
+code-lens effectiveness — example-repo · last 72h · 38 session(s)
 
   moment        happened  index could  index did     KPI
   search            4415         1512        778   51.5%

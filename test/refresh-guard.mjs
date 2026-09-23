@@ -162,7 +162,7 @@ process.exit(0);
 
 
 // ── cost decides the wait, in proportion — never as a cliff ─────────────────
-// The old rule deferred anything over 60s by a full hour. a large monorepo came
+// The old rule deferred anything over 60s by a full hour. A large monorepo came
 // in at 121s and sat 19-43 commits behind permanently; after the scope fix it
 // came in at 58.7s, on the same cliff from the other side. A second of measured
 // cost must not decide an hour of staleness.

@@ -84,7 +84,7 @@ Measured on one build, one day: **97.2 %, 47.3 %, 38.5 %, 0.0 %**. The number
 moves with what those agents spend the day doing.
 
 The strongest example is this one: over four hours the six agents in
-a large monorepo produced **four edits, all Markdown**, and five of them were idle
+A large monorepo produced **four edits, all Markdown**, and five of them were idle
 the whole time, waiting on a human reply after finishing their reports. A code
 index cannot serve a fleet that is writing sprint documents and waiting for
 rulings, and a tool that reports a bad number in that situation is measuring the
