@@ -17,7 +17,7 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -119,6 +119,56 @@ export const saveState = (s: State, file = STATE) => {
  * index — caught in the act, mid-run. A pass this list does not name is a pass
  * this guard cannot protect.
  */
+/**
+ * Is the graph index for THIS repository being rebuilt right now?
+ *
+ * `indexRunning()` answers for the whole machine, which is right for the refresh
+ * itself (never start a second CPU-heavy pass) and wrong for everything that
+ * reads. Measured with a warm session, querying two repositories every 250 ms
+ * while one was force-rebuilt: the rebuilding one answered in 246 ms median
+ * (1.4 s max), the other in 4 ms median (134 ms max). A rebuild slows its own
+ * repository and nothing else, so muting every repository for it discarded
+ * answers that were one query away. One 60-second sample found some pass in
+ * flight 73% of the time — almost all of it other repositories.
+ *
+ * Two signals, either sufficient: the engine's own `analyze.lock` with a live
+ * owner, and a `gitnexus analyze` whose working directory is this repository
+ * (the lock only appears once a real rebuild starts, not on a no-op pass).
+ */
+export function graphRebuildingHere(dir: string): boolean {
+  let root: string;
+  try { root = realpathSync(dir); } catch { return false; }
+  try {
+    const rec = JSON.parse(readFileSync(join(root, '.gitnexus', 'analyze.lock'), 'utf8'));
+    if (Number(rec?.pid) > 0) { try { process.kill(Number(rec.pid), 0); return true; } catch { /* stale lock */ } }
+  } catch { /* no lock: the usual case */ }
+  let pids: string[];
+  try {
+    pids = execFileSync('pgrep', ['-f', '(^|/)gitnexus +analyze'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 }).split('\n').filter(Boolean);
+  } catch { return false; }   // pgrep exits 1 when nothing matches
+  return pids.some((p) => { try { return realpathSync(`/proc/${p}/cwd`) === root; } catch { return false; } });
+}
+
+/**
+ * The layers an index carries, read from the index's own metadata.
+ *
+ * This used to be two full-scan counts against the shared graph server, each
+ * with a 20 s timeout, re-run whenever an index had been rewritten — which on
+ * a busy repository is every cycle. The server is single-threaded; a probe that
+ * touched a repository whose data had been swapped out stalled it for ~20 s,
+ * and an agent's own `lens_breaks` issued in that window waited 20.2 s and got
+ * nothing back. The metadata already says it: a `pdg` key is written when the
+ * control-flow layer is built, and `stats.embeddings` counts vectors. Checked
+ * against the live probe on five repositories: identical on all five.
+ */
+export function layersFromMeta(dir: string): { pdg: boolean; embeddings: boolean } | undefined {
+  try {
+    const m = JSON.parse(readFileSync(join(dir, '.gitnexus', 'meta.json'), 'utf8'));
+    return { pdg: m?.pdg != null, embeddings: Number(m?.stats?.embeddings ?? 0) > 0 };
+  } catch { return undefined; }
+}
+
 export function indexRunning(): string | null {
   // Anchored to the BINARY, not to a mention. An unanchored pattern matches any
   // process whose command line merely contains the words — a shell running
@@ -251,6 +301,17 @@ export async function detectLayers(
   // caused by the optimisation that makes it affordable.
   const stamp = indexedAt(dir);
   if (st.layers && st.layersFor === stamp) return st.layers;
+  // The metadata first — no server round trip, so no way to stall the server
+  // everyone else is querying. The probe below remains only for an index whose
+  // metadata cannot be read.
+  const recorded = layersFromMeta(dir);
+  if (recorded) {
+    if (recorded.pdg) st.wantPdg = true;   // same upward latch as the probe path
+    const layers = { pdg: recorded.pdg || st.wantPdg === true, embeddings: recorded.embeddings };
+    st.layers = layers;
+    st.layersFor = stamp;
+    return layers;
+  }
   const g = new GraphEngine();
   const count = async (label: string): Promise<number> => {
     try {

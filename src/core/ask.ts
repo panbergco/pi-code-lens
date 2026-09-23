@@ -12,7 +12,7 @@ import type { Candidate, Neighbourhood } from '../engines/types.js';
 import { route, type Plan } from './router.js';
 import { fuse, DEFAULT_WEIGHTS, type Spot } from './fuse.js';
 import { healIfStale, workingTreeDrift } from './heal.js';
-import { indexRunning } from '../commands/refresh.js';
+import { graphRebuildingHere } from '../commands/refresh.js';
 
 export interface AskInput {
   question: string;
@@ -101,9 +101,11 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
       // to stamp on a pass already in flight. Healing on the read path made this
       // common rather than rare: a lagging index now rebuilds because it was
       // asked, so a question during that window is normal, not an error.
-      const pass = indexRunning();
+      // THIS repository, not any repository: a rebuild elsewhere does not make
+      // this one's index missing, and saying so would be a false excuse.
+      const pass = graphRebuildingHere(cwd);
       notes.push(pass
-        ? `structure is being rebuilt right now (${pass} pass in flight) — ask again in a moment; ` +
+        ? `structure is being rebuilt right now — ask again in a moment; ` +
           `text matches below are unaffected`
         : `structure unavailable: the graph engine has no index for "${target}" ` +
           `(indexed: ${gh.repos.join(', ') || 'none'}) — run: gitnexus analyze`);
@@ -115,7 +117,17 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
         // was meant to save had long since grepped. The whole argument for this
         // tool is that it beats reading files, so the structural stage gets a
         // deadline and the answer goes out without it when the deadline passes.
-        const budget = Number(process.env.LENS_STRUCTURE_MS ?? 20_000);
+        //
+        // And shorter still while this repository is being rebuilt. Its queries
+        // slow down for the length of the pass, and an agent that asked a
+        // question is better served by the text half now and a note than by a
+        // 20-second wait for a structural half that may not come — measured: an
+        // agent's own lens_breaks waited 20.2 s and returned nothing.
+        const rebuilding = graphRebuildingHere(cwd);
+        if (rebuilding) notes.push('structure is being rebuilt right now — callers may be missing; ask again in a moment');
+        const budget = rebuilding
+          ? Number(process.env.LENS_STRUCTURE_BUSY_MS ?? 3_000)
+          : Number(process.env.LENS_STRUCTURE_MS ?? 20_000);
         const deadline = <T>(p: Promise<T>, what: string) => Promise.race([
           p,
           new Promise<T>((_, rej) =>

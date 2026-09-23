@@ -139,10 +139,6 @@ rmSync(envDir, { recursive: true, force: true });
 
 rmSync(repo, { recursive: true, force: true });
 console.log('ok — no refresh starts on top of another pass, and no stale layer answer survives a rebuild');
-// The graph engine keeps its connection alive and exposes no way to close it;
-// the refresh command exits the process instead. Do the same rather than hang.
-reapDecoys();
-process.exit(0);
 
 
 // ── a pass may not revert what it never read ────────────────────────────────
@@ -201,3 +197,75 @@ assert.equal(minGapMs(), 0, 'a repo never measured is due now');
   healIfStale('/other', 99, { now: at(1), spawnFn });
   assert.equal(spawned.length, 1, 'nor does a different repo while one is still in flight');
 }
+
+
+// ── layers come from the index's metadata, not from the shared server ───────
+// The probe was two full-scan counts against a single-threaded server, re-run
+// whenever an index was rewritten. One of them stalled the server ~20 s and an
+// agent's own lens_breaks, issued in that window, waited 20.2 s for nothing.
+// The metadata already records both layers; this must never touch the engine.
+{
+  const { layersFromMeta } = await import('../dist/commands/refresh.js');
+  const dir = mkdtempSync(join(tmpdir(), 'lens-meta-'));
+  mkdirSync(join(dir, '.gitnexus'), { recursive: true });
+  const meta = (m) => writeFileSync(join(dir, '.gitnexus', 'meta.json'), JSON.stringify(m));
+
+  meta({ indexedAt: 'a', pdg: { maxFunctionLines: 2000 }, stats: { embeddings: 0 } });
+  assert.deepEqual(layersFromMeta(dir), { pdg: true, embeddings: false }, 'a pdg record means the control-flow layer exists');
+  meta({ indexedAt: 'b', stats: { embeddings: 370 } });
+  assert.deepEqual(layersFromMeta(dir), { pdg: false, embeddings: true }, 'and a vector count means embeddings exist');
+  rmSync(join(dir, '.gitnexus', 'meta.json'));
+  assert.equal(layersFromMeta(dir), undefined, 'no metadata is "unknown", not "no layers"');
+
+  // Through detectLayers: fast, and without any engine at all.
+  meta({ indexedAt: 'c', pdg: {}, stats: { embeddings: 0 } });
+  const st = {};
+  const t0 = Date.now();
+  const layers = await detectLayers('repo', st, dir, 20_000);
+  assert.ok(Date.now() - t0 < 500, `read from a file, not a 20 s server probe (${Date.now() - t0}ms)`);
+  assert.equal(layers.pdg, true);
+  assert.equal(st.wantPdg, true, 'and a layer seen once stays wanted');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// ── a rebuild is judged per repository ──────────────────────────────────────
+// Measured: while one repository was rebuilt, queries to another stayed at a
+// 4 ms median. A machine-wide "is anything indexing" muted every repository
+// for a pass on any one of them.
+{
+  const { graphRebuildingHere } = await import('../dist/commands/refresh.js');
+  const mine = mkdtempSync(join(tmpdir(), 'lens-mine-'));
+  const other = mkdtempSync(join(tmpdir(), 'lens-other-'));
+  assert.equal(graphRebuildingHere(mine), false, 'nothing running, nothing rebuilding');
+
+  // A decoy `gitnexus analyze` in the OTHER repository.
+  // `cwd`, not `cd X && … &`: that form backgrounds the whole list in a
+  // subshell, and the decoy dies with it the moment this shell exits.
+  const pid = Number(execFileSync('bash',
+    ['-c', `setsid nohup bash -c 'exec -a "/usr/bin/gitnexus analyze --index-only" sleep 5' >/dev/null 2>&1 & echo $!`],
+    { encoding: 'utf8', cwd: other }).trim());
+  decoys.push(pid);
+  for (let i = 0; i < 40 && !graphRebuildingHere(other); i++) execFileSync('sleep', ['0.05']);
+  try {
+    assert.equal(graphRebuildingHere(other), true, 'a pass in a repository is seen there');
+    assert.equal(graphRebuildingHere(mine), false, 'and not anywhere else');
+  } finally { reapDecoys(); }
+
+  // The engine's own lock counts too, but only while its owner is alive.
+  mkdirSync(join(mine, '.gitnexus'), { recursive: true });
+  writeFileSync(join(mine, '.gitnexus', 'analyze.lock'), JSON.stringify({ v: 1, pid: process.pid }));
+  assert.equal(graphRebuildingHere(mine), true, 'a live lock owner means a rebuild');
+  writeFileSync(join(mine, '.gitnexus', 'analyze.lock'), JSON.stringify({ v: 1, pid: 2 ** 22 + 7 }));
+  assert.equal(graphRebuildingHere(mine), false, 'a lock left by a dead process means nothing');
+  rmSync(mine, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
+}
+console.log('ok — layers read from metadata, and a rebuild only mutes its own repository');
+
+// The graph engine keeps its connection alive and exposes no way to close it;
+// the refresh command exits the process instead. Do the same rather than hang.
+//
+// This exit sat in the MIDDLE of the file for weeks, and every block appended
+// below it — the state-merge guard, proportional cadence, heal-on-read — never
+// executed while the suite reported green. It must stay the last statement.
+reapDecoys();
+process.exit(0);

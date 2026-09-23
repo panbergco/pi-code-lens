@@ -176,7 +176,13 @@ export class GraphEngine implements Engine {
     const value = await this.health();
     // Only cache a GOOD answer: caching "engine down" would keep reporting an
     // outage for a minute after it recovered.
-    if (value.up) this.cachedHealth = { at: Date.now(), value };
+    // Cache only a COMPLETE answer. A repository list that failed to load — a
+    // busy moment during a rebuild is enough — used to be cached as "up, no
+    // repositories" for a full minute, and every answer in that minute told
+    // the reader the graph engine had no index for their repository. Measured:
+    // right after a restart the hot server said "indexed: none" for a
+    // repository with 24 callers on record, until the cache expired.
+    if (value.up && !value.partial) this.cachedHealth = { at: Date.now(), value };
     return value;
   }
 
@@ -184,13 +190,14 @@ export class GraphEngine implements Engine {
     try {
       const tools = await this.capabilities();
       let repos: string[] = [];
+      let partial = false;
       try {
         const r = GraphEngine.unwrap(await this.rpc('tools/call',
           { name: 'list_repos', arguments: {} }, 20_000));
         const list = Array.isArray(r) ? r : (r?.repos ?? r?.repositories ?? []);
         repos = list.map((x: any) => (typeof x === 'string' ? x : x?.name ?? x?.label)).filter(Boolean);
-      } catch { /* tool list already proves liveness */ }
-      return { id: this.id, up: true, repos, detail: `${tools.length} tools` };
+      } catch { partial = true; /* the tool list already proves liveness; the repo list is unknown, not empty */ }
+      return { id: this.id, up: true, repos, detail: `${tools.length} tools`, ...(partial ? { partial } : {}) };
     } catch (e) {
       return {
         id: this.id, up: false, repos: [],
