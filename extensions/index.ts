@@ -45,6 +45,7 @@ import { Type } from "typebox";
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
 import { foundNothing, freshnessCaveat, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
+import { recordDelivery } from "../src/core/deliveries.js";
 import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
 import { loadSettings, saveSettings, SETTINGS_PATH } from "../src/core/settings.js";
@@ -684,10 +685,25 @@ export default function piCodeLens(pi: ExtensionAPI) {
         }, Math.max(1, wall - Date.now())); }),
       ]);
     };
-    const [pack, map] = await Promise.all([
+    const hookStart = Date.now();
+    const [packed, map] = await Promise.all([
       byWall(promptPack(event.prompt, ctx.cwd), "pack"),
       byWall(repoMap(ctx.cwd), "repo map"),
     ]);
+    const pack = packed?.text;
+    // Recorded HERE, after the race, because only here is the outcome known: a
+    // pack that lost to the wall keeps computing and would otherwise log itself
+    // as delivered while the agent never saw it. Conversational turns and a
+    // switched-off channel are not opportunities, so they are not logged.
+    if (!packed) {
+      recordDelivery(ctx.cwd, { channel: "prompt", outcome: "silent", reason: "missed the deadline", ms: Date.now() - hookStart });
+    } else if (packed.why !== "too short" && packed.why !== "augment off") {
+      recordDelivery(ctx.cwd, {
+        channel: "prompt", outcome: packed.why === "pack" ? "delivered" : "silent", reason: packed.why,
+        subjects: packed.subjects, ms: Date.now() - hookStart, bytes: packed.text?.length ?? 0,
+      });
+    }
+    if (map) recordDelivery(ctx.cwd, { channel: "map", outcome: "delivered", reason: "first turn", bytes: map.length });
 
     const announced = ANNOUNCED_BY_PI.test(event.systemPrompt) || event.systemPrompt.includes(RULES_HEADING);
     const result: { systemPrompt?: string; message?: any } = {};
@@ -754,7 +770,11 @@ export default function piCodeLens(pi: ExtensionAPI) {
     const symbol = symbolFromPath(path);
     if (!symbol) return;
     if (freshness(ctx.cwd).state === "unindexed") return;
-    if (recall().answered.has(symbol.toLowerCase())) return;
+    if (recall().answered.has(symbol.toLowerCase())) {
+      recordDelivery(ctx.cwd, { channel: "edit", outcome: "silent", reason: "answered minutes ago", subjects: [symbol] });
+      return;
+    }
+    const started = Date.now();
 
     // A file is not a symbol. `lane-mint.ts`, `dataset.ts`, `capture-control.mjs`
     // name FILES, and asking the caller graph about them returns nothing — which
@@ -764,7 +784,10 @@ export default function piCodeLens(pi: ExtensionAPI) {
     let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
     if (!answer) {
       const importers = await graphEngine().importersOf(symbol, await repoOf(ctx.cwd), 6);
-      if (!importers.length) return;   // nothing depends on it: nothing to warn about
+      if (!importers.length) {   // nothing depends on it: nothing to warn about
+        recordDelivery(ctx.cwd, { channel: "edit", outcome: "silent", reason: "no dependents found", subjects: [symbol], ms: Date.now() - started });
+        return;
+      }
       answer = {
         subject: symbol,
         body: `imported by ${importers.length} file${importers.length === 1 ? "" : "s"} found: ` +
@@ -775,6 +798,8 @@ export default function piCodeLens(pi: ExtensionAPI) {
     }
     augmentHits++;
     trace("blast radius", symbol);
+    recordDelivery(ctx.cwd, { channel: "edit", outcome: "delivered", reason: "dependents", subjects: [symbol],
+                              ms: Date.now() - started, bytes: answer.body.length });
     return {
       content: [...(event.content ?? []), {
         type: "text" as const,
@@ -810,7 +835,20 @@ export default function piCodeLens(pi: ExtensionAPI) {
     if (event.isError && !empty) return;   // the command itself failed
     const subjects = subjectsForSearch(event.toolName, input, text,
       recall(), settings.maxSubjects);
-    if (!subjects.length) return;
+    if (!subjects.length) {
+      // Held back on purpose is still a decision, and the biggest group of
+      // "misses" in every measurement so far: say so in the log, by name.
+      const raw = subjectsForSearch(event.toolName, input, text, { answered: new Set(), unanswerable: new Set() }, settings.maxSubjects);
+      if (raw.length) {
+        const mem = recall();
+        recordDelivery(ctx.cwd, { channel: empty ? "empty-search" : "search", outcome: "silent",
+          reason: mem.answered.has(raw[0]!.toLowerCase()) ? "answered minutes ago" : "recent dead end", subjects: raw });
+      }
+      return;
+    }
+    const started = Date.now();
+    const channel = empty ? "empty-search" : "search";
+    lastSilence = "";
 
     augmentFires++;
     trace("search", event.toolName, JSON.stringify(String(input.command ?? input.pattern ?? input.path ?? "")).slice(0, 120));
@@ -836,7 +874,12 @@ export default function piCodeLens(pi: ExtensionAPI) {
       found.push(answer);
       left -= estimateTokens(answer.body);
     }
-    if (!found.length) { trace("nothing structural to add"); return; }
+    if (!found.length) {
+      trace("nothing structural to add");
+      recordDelivery(ctx.cwd, { channel, outcome: "silent", reason: lastSilence || "no structure",
+                                subjects, ms: Date.now() - started });
+      return;
+    }
 
     augmentHits++;
     trace("appended", found.map((f) => f.subject).join(","), `${settings.budgetTokens - left} tok`);
@@ -852,6 +895,8 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // value visible at the moment of delivery instead of reconstructing it from
     // transcripts days later — which is how adoption stayed invisible for weeks.
     const saved = savingsLine(body, found.flatMap((f) => f.files ?? []), ctx.cwd);
+    recordDelivery(ctx.cwd, { channel, outcome: "delivered", reason: "answered", subjects: found.map((x) => x.subject),
+                              ms: Date.now() - started, bytes: body.length + (saved?.length ?? 0) });
     return {
       content: [...event.content, {
         type: "text" as const,
@@ -911,12 +956,17 @@ export default function piCodeLens(pi: ExtensionAPI) {
     } catch { return undefined; }
   }
 
-  async function promptPack(prompt: string, cwd: string): Promise<string | undefined> {
-    if (!settings.augment) { trace("prompt: augment off"); return undefined; }
+  /** What the prompt hook decided: the text to inject, if any, and why. The
+   *  caller records the outcome, because only the caller knows whether the
+   *  text arrived before the 400 ms wall or was dropped at it. */
+  type PackResult = { text?: string; why: string; subjects?: string[] };
+
+  async function promptPack(prompt: string, cwd: string): Promise<PackResult> {
+    if (!settings.augment) { trace("prompt: augment off"); return { why: "augment off" }; }
     const q = (prompt ?? "").trim();
-    if (q.length < MIN_PROMPT_CHARS) { trace("prompt: too short", q); return undefined; }
+    if (q.length < MIN_PROMPT_CHARS) { trace("prompt: too short", q); return { why: "too short" }; }
     const state = freshness(cwd).state;
-    if (state === "unindexed") { trace("prompt: unindexed", cwd); return undefined; }
+    if (state === "unindexed") { trace("prompt: unindexed", cwd); return { why: "unindexed" }; }
     // Never queue behind a rebuild on a person's time. The stall an operator
     // measured was the engine REINDEXING: sockets to it opened a second into the
     // wait and stayed open, while this process used 240 ms of CPU across 7.1 s
@@ -940,14 +990,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // proving the feature works.
     if (!process.env.LENS_TEST_NO_PASS && graphRebuildingHere(cwd)) {
       trace("prompt: skipped", "this repository's graph is being rebuilt");
-      return undefined;
+      return { why: "rebuilding" };
     }
     // Ask only about what the prompt names as CODE. The whole prompt, asked as
     // a question, routes prose to recall-plus-structure at 430-550 ms, and the
     // wall is 400: six real prompts replayed, six misses, one pack in three
     // hours. A named symbol takes the structural path alone at ~212 ms.
     const subjects = promptSubjects(q, 2);
-    if (!subjects.length) { trace("prompt: names no code", q.slice(0, 60)); return undefined; }
+    if (!subjects.length) { trace("prompt: names no code", q.slice(0, 60)); return { why: "names no code" }; }
     try {
       let answer: Awaited<ReturnType<typeof answerFor>>;
       for (const s of subjects) {
@@ -958,30 +1008,33 @@ export default function piCodeLens(pi: ExtensionAPI) {
         // Silence is not free. Graft measured the alternative: assuming the agent
         // would reach for the tool on its own, it grepped 38 times instead. Say
         // the one useful thing, twice per session, then stop.
-        if (nudges >= NUDGE_CAP) return undefined;
+        if (nudges >= NUDGE_CAP) return { why: "no answer (nudges spent)", subjects };
         nudges++;
         // Name the call, not the news. Graft rewrote the same line after tracing
         // a session where a bare "no match" left the agent to grep 38 times:
         // a nudge that does not carry the command is just an apology.
         const asking = q.length > 90 ? `${q.slice(0, 90)}…` : q;
-        return `[code-lens] nothing strong matched this prompt automatically — the index holds more ` +
+        return { why: "nudged", subjects, text: `[code-lens] nothing strong matched this prompt automatically — the index holds more ` +
                `than that probe found. Before grepping, run:\n` +
                `  lens_ask { question: "${asking.replace(/"/g, "'")}" }\n` +
-               `and lens_breaks on any symbol you are about to change.`;
+               `and lens_breaks on any symbol you are about to change.` };
       }
       // Novelty: a spot already shown this session is not news, and re-injecting
       // it spends the reader's context to tell them something they have.
       const lines = answer.body.split("\n").filter((l) => !injected.has(l.trim()) || !/^\d+\./.test(l.trim()));
       const fresh = answer.body.split("\n").filter((l) => /^\s*\d+\./.test(l) && !injected.has(l.trim()));
-      if (!fresh.length) return undefined;
+      if (!fresh.length) return { why: "already shown", subjects };
       for (const l of fresh) {
         injected.add(l.trim());
         if (injected.size > INJECTED_CAP) injected.delete(injected.values().next().value as string);
       }
-      return `[code-lens — what the index already knows about this task]\n${lines.join("\n")}\n` +
-             `Follow a pointer with lens_ask or lens_breaks; do not grep for what is listed above.`;
-    } catch { return undefined; }   // a pack is never worth failing a turn over
+      return { why: "pack", subjects, text: `[code-lens — what the index already knows about this task]\n${lines.join("\n")}\n` +
+             `Follow a pointer with lens_ask or lens_breaks; do not grep for what is listed above.` };
+    } catch { return { why: "failed" }; }   // a pack is never worth failing a turn over
   }
+
+  /** Why the last answerFor() came back empty, for the delivery log. */
+  let lastSilence = "";
 
   async function answerFor(subject: string, cwd: string, budgetMs = settings.timeoutMs, budgetTokens = settings.budgetTokens) {
     const key = subject.toLowerCase();
@@ -1001,6 +1054,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
         // Park it briefly, not for the full dead-end window: nothing was learned
         // about the index here, only about how busy it was this second.
         trace("timeout/none", subject);
+        lastSilence = "timed out";
         unanswerable.set(key, Date.now() - (DEAD_END_TTL_MS - SLOW_RETRY_MS));
         return undefined;
       }
@@ -1037,6 +1091,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
             files: importers,
           };
         }
+        lastSilence = "no structure";
         unanswerable.set(key, Date.now());
         return undefined;
       }
@@ -1051,6 +1106,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const behind = Number(/structure is (\d+) commits? behind/.exec(result.notes.join(' '))?.[1] ?? 0);
       if (behind > MAX_BEHIND) {
         trace("stale", subject, `${behind} commits behind — suppressed`);
+        lastSilence = "index too far behind";
         return undefined;   // deliberately NOT memoised: the next refresh fixes it
       }
 
@@ -1077,6 +1133,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       return { subject, body, files };
     } catch (e) {
       trace("failed", subject, String((e as Error)?.message ?? e).slice(0, 120));
+      lastSilence = "engine error";
       unanswerable.set(key, Date.now());   // an engine that failed once will fail again this turn
       return undefined;
     } finally {

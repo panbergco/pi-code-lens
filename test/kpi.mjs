@@ -59,6 +59,18 @@ const dir = join(home, '.pi', 'agent', 'sessions', `-${repo.replace(/\//g, '-')}
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, 'session.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
 
+// ── and a delivery log, as the extension writes it when it decides ──────────
+mkdirSync(join(home, '.code-lens', 'deliveries'), { recursive: true });
+const d = (o) => JSON.stringify({ t: now - 30_000, ...o });
+writeFileSync(join(home, '.code-lens', 'deliveries', 'fixture.jsonl'), [
+  d({ channel: 'prompt', outcome: 'delivered', reason: 'pack', ms: 210 }),
+  d({ channel: 'prompt', outcome: 'silent', reason: 'names no code', ms: 3 }),
+  d({ channel: 'prompt', outcome: 'silent', reason: 'names no code', ms: 4 }),
+  d({ channel: 'prompt', outcome: 'silent', reason: 'missed the deadline', ms: 401 }),
+  d({ channel: 'search', outcome: 'delivered', reason: 'answered', ms: 90 }),
+  d({ channel: 'search', outcome: 'silent', reason: 'answered minutes ago' }),
+].join('\n') + '\n');
+
 const { kpi } = await import('../dist/commands/kpi.js');
 const out = [];
 const log = console.log;
@@ -73,6 +85,10 @@ assert.deepEqual(row('prompt').slice(1, 4), ['4', '3', '1'],
 assert.match(text, /packs on prompts that named no known code: 1/, 'a pack nobody asked for is reported, not credited');
 assert.match(text, /lens tools: 2 · grep\/rg\/read for code: 1/, 'every lens call the agent chose is counted');
 assert.match(text, /prompt: nudged, not answered|prompt: named known code, got nothing/, 'misses are attributed');
+assert.match(text, /recorded live \(delivery log, 6 decisions\)/, 'the live record is reported beside the reconstruction');
+const promptLine = text.split('\n').find((l) => /^\s+prompt\s+1\s+3/.test(l));
+assert.ok(promptLine, `prompt: 1 delivered, 3 silent, as written:\n${text}`);
+assert.match(promptLine, /names no code ×2/, 'with the reasons for silence, most common first');
 
 rmSync(home, { recursive: true, force: true });
 console.log('ok — the effectiveness report scores the moments it claims to');

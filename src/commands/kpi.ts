@@ -36,6 +36,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { GraphEngine } from '../engines/graph.js';
 import { promptSubjects, searchSubject } from '../core/augment.js';
+import { readDeliveries, type Delivery } from '../core/deliveries.js';
 
 /** Sessions pi keeps for a checkout: the absolute path, `/` → `-`, fenced by `--`. */
 export function sessionDirFor(repoDir: string, home = homedir()): string {
@@ -267,10 +268,38 @@ export async function kpi(
   K.misses = [...missed.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
   await graph.close();
   render(K, o.sinceHours ?? 24);
+  renderLog(readDeliveries(cwd, since), Boolean(o.sessions?.length));
   return 0;
 }
 
 const bump = (K: Kpi, k: string) => { K.why[k] = (K.why[k] ?? 0) + 1; };
+
+/**
+ * What the delivery log recorded, channel by channel, with the reasons for
+ * silence. The table above is reconstructed from transcripts; this is what the
+ * extension wrote down at the moment it decided. Where the two disagree, the
+ * log is the record and the transcripts are the check.
+ */
+function renderLog(log: Delivery[], filtered: boolean): void {
+  if (!log.length) {
+    console.log('\n  delivery log: nothing recorded for this repository in this window yet');
+    return;
+  }
+  const channels = ['prompt', 'search', 'empty-search', 'edit', 'map'] as const;
+  console.log(`\n  recorded live (delivery log, ${log.length} decisions${filtered ? ', every session in this repository' : ''}):`);
+  console.log('    channel'.padEnd(18) + 'delivered'.padStart(10) + 'silent'.padStart(8) + '  median ms   why silent');
+  for (const ch of channels) {
+    const rows = log.filter((d) => d.channel === ch);
+    if (!rows.length) continue;
+    const ok = rows.filter((d) => d.outcome === 'delivered');
+    const ms = rows.map((d) => d.ms).filter((x): x is number => typeof x === 'number').sort((a, b) => a - b);
+    const why = new Map<string, number>();
+    for (const d of rows) if (d.outcome === 'silent') why.set(d.reason, (why.get(d.reason) ?? 0) + 1);
+    const top = [...why.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} ×${n}`).join(', ');
+    console.log(`    ${ch}`.padEnd(18) + String(ok.length).padStart(10) + String(rows.length - ok.length).padStart(8) +
+                `  ${ms.length ? String(ms[ms.length >> 1]).padStart(9) : '        —'}   ${top}`);
+  }
+}
 
 function render(K: Kpi, hours: number): void {
   const pct = (a: number, b: number) => (b ? `${(a / b * 100).toFixed(1)}%` : '—');

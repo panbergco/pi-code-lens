@@ -328,3 +328,39 @@ console.log('ok — a slow index delays the turn by a deadline, never by an engi
   rmSync(dir, { recursive: true, force: true });
 }
 console.log('ok — a session start or reload no longer rebuilds a repository one commit behind');
+
+
+// ── every decision is written down when it is made ──────────────────────────
+// The effectiveness report used to rebuild this from transcripts afterwards,
+// and broke each time the delivery format moved. The log is the record now.
+{
+  const { readDeliveries } = await import('../dist/core/deliveries.js');
+  // The suite tore its fixture down earlier, taking any earlier log with it, so
+  // make the decisions here: one of each kind, then read what was written.
+  mkdirSync(join(repo, '.gitnexus'), { recursive: true });
+  writeFileSync(join(repo, '.gitnexus', 'meta.json'),
+    JSON.stringify({ lastCommit: 'a'.repeat(40), indexedAt: new Date().toISOString() }));
+  const since = Date.now();
+  reset(); await run({ input: { command: 'grep -rn loggedSymbol src' } });                 // answered
+  reset(); answer = textualOnly; await run({ input: { command: 'grep -rn quietSymbol src' } });   // silent
+  reset(); await handlers.before_agent_start({ prompt: 'where does the lane grant get refused?', systemPrompt: 'x' }, ctx);
+  reset(); answer = { ...structural, symbol: 'packedSymbol', file: 'src/packed.ts', line: 7 };   // a spot not shown before
+  await handlers.before_agent_start({ prompt: 'what calls packedSymbol now?', systemPrompt: 'x' }, ctx);
+  reset(); await handlers.tool_result({ toolName: 'edit', input: { path: '/r/src/editedThing.ts' },
+    content: [{ type: 'text', text: 'ok' }], isError: false }, ctx);
+  const logged = readDeliveries(repo, since, repo);        // HOME is the fixture repo in this suite
+  const has = (channel, outcome, reason) => logged.some((d) =>
+    d.channel === channel && d.outcome === outcome && (reason === undefined || d.reason === reason));
+  assert.ok(has('search', 'delivered', 'answered'), 'an answered search is logged as delivered');
+  assert.ok(has('search', 'silent'), 'and a silent one with its reason');
+  assert.ok(has('prompt', 'silent', 'names no code'), 'a prompt that names no code is logged, by that reason');
+  assert.ok(has('prompt', 'delivered', 'pack'), 'a pack that reached the agent is logged as delivered');
+  // (A spot already shown this session is held back, and logged as exactly that — which is how this test first failed.)
+  assert.ok(has('edit', 'delivered', 'dependents'), 'so is a blast radius');
+  const raw = JSON.stringify(logged);
+  assert.ok(!/lane grant|refactor billingSubsystem now|where does/.test(raw),
+    'prompt text never reaches the log — only the code names asked about');
+  assert.ok(!logged.some((d) => d.channel === 'prompt' && d.reason === 'too short'),
+    'and conversational turns are not opportunities, so they are not logged');
+}
+console.log('ok — every automatic-answer decision is logged when it is made, without prompt text');
