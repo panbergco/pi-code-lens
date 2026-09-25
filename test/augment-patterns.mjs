@@ -155,3 +155,34 @@ assert.equal(searchSubject('bash', { command: 'cd /repo && rg -n "parseRoadmap" 
   assert.deepEqual(promptSubjects('fooBar and FOOBAR and fooBar again'), ['fooBar'], 'each once');
 }
 console.log('ok — a prompt is asked about only the code it names');
+
+
+// ── an automatic answer carries the index's own warnings ────────────────────
+// They used to be read only to decide whether to stay silent, so a stale answer
+// arrived looking exactly like a fresh one. Commit lag below the rebuild point
+// is left out on purpose: a busy repository is nearly always a commit behind,
+// and a warning on every answer is one nobody reads.
+{
+  const { freshnessCaveat, CAVEAT_AT_COMMITS } = await import('../dist/core/augment.js');
+  assert.equal(freshnessCaveat([]), '', 'no notes, no line');
+  assert.equal(freshnessCaveat(['structure is 1 commit behind HEAD (indexed abc)']), '',
+    'a commit or two behind is normal, and not worth a line');
+  assert.match(freshnessCaveat([`structure is ${CAVEAT_AT_COMMITS} commits behind HEAD (indexed abc)`]),
+    /^\n! structure is 5 commits behind/, 'from the rebuild point, lag is stated');
+  assert.match(freshnessCaveat(['structure is being rebuilt right now — callers may be missing']),
+    /being rebuilt/, 'a rebuild in flight is always stated');
+  assert.match(freshnessCaveat(['structure is 2 commits behind HEAD (indexed abc) · 3 files edited since indexing (a.ts, b.ts, c.ts)']),
+    /edited since indexing \(a\.ts/, 'and so are files edited since, which is where an answer is most likely wrong');
+  const many = freshnessCaveat(['structure is being rebuilt right now', 'x edited since indexing', 'structure is 9 commits behind HEAD']);
+  assert.equal(many.trim().split('\n').length, 2, 'at most two lines');
+}
+
+// ── counts are what was found, never a total ────────────────────────────────
+{
+  const { fuse, DEFAULT_WEIGHTS } = await import('../dist/core/fuse.js');
+  const spots = fuse([{ file: 'a.ts', startLine: 1, symbol: 'f', source: 'graph', relevance: 1 }],
+    new Map([['a.ts:1', { callers: ['x', 'y', 'z'], callees: [], flows: [] }]]), DEFAULT_WEIGHTS);
+  assert.ok(spots[0].signals.some((s) => s === '3 callers found'),
+    `a static graph reports callers it found, not all there are (got ${spots[0].signals})`);
+}
+console.log('ok — automatic answers carry their caveats, and counts say "found"');

@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
-import { foundNothing, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
+import { foundNothing, freshnessCaveat, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
 import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
@@ -767,7 +767,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       if (!importers.length) return;   // nothing depends on it: nothing to warn about
       answer = {
         subject: symbol,
-        body: `imported by ${importers.length} file${importers.length === 1 ? "" : "s"}: ` +
+        body: `imported by ${importers.length} file${importers.length === 1 ? "" : "s"} found: ` +
               importers.map((f) => f.split("/").slice(-2).join("/")).join(", "),
         files: importers,
       };
@@ -1031,8 +1031,9 @@ export default function piCodeLens(pi: ExtensionAPI) {
           answered.set(key, Date.now());
           return {
             subject,
-            body: `imported by ${importers.length} file${importers.length === 1 ? '' : 's'}: ` +
-                  importers.map((f) => f.split('/').slice(-2).join('/')).join(', '),
+            body: `imported by ${importers.length} file${importers.length === 1 ? '' : 's'} found: ` +
+                  importers.map((f) => f.split('/').slice(-2).join('/')).join(', ') +
+                  freshnessCaveat(result.notes),
             files: importers,
           };
         }
@@ -1067,8 +1068,11 @@ export default function piCodeLens(pi: ExtensionAPI) {
         if (at) { file = at.file; line = at.line; }
       }
       const lifted = crux(file, line, cwd);
+      // The index's own warnings travel with the answer. They used to be read
+      // only to decide on silence, so a stale answer looked like a fresh one.
       const body = render(structural, budgetTokens) +
-        (lifted ? `\n\n${file}:${line}\n\`\`\`\n${lifted}\n\`\`\`` : "");
+        (lifted ? `\n\n${file}:${line}\n\`\`\`\n${lifted}\n\`\`\`` : "") +
+        freshnessCaveat(result.notes);
       const files = [file, ...structural.map((s) => s.file)].filter((f) => f.includes("/"));
       return { subject, body, files };
     } catch (e) {

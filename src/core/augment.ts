@@ -229,6 +229,30 @@ export interface SubjectMemory { answered: Set<string>; unanswerable: Set<string
 /** A search result too small to have found anything asks no question. */
 export const MIN_OUTPUT_CHARS = 40;
 
+/** Commits behind from which lag is worth a line on an automatic answer — the
+ *  same point at which a read starts a rebuild. Below it, a busy repository is
+ *  almost always a commit or two behind, and a warning on every answer is one
+ *  nobody reads. */
+export const CAVEAT_AT_COMMITS = 5;
+
+/**
+ * The index's own warnings, as the lines an automatic answer should carry.
+ *
+ * The pipeline notes when structure is behind, being rebuilt, or older than
+ * files edited since. The automatic answers used to read those notes only to
+ * decide whether to stay silent, and never showed them, so a slightly stale
+ * answer arrived looking exactly like a fresh one. Kept to two short lines.
+ */
+export function freshnessCaveat(notes: string[]): string {
+  const keep = notes.filter((n) => {
+    if (/being rebuilt|edited since indexing|no longer in this branch/i.test(n)) return true;
+    const behind = Number(/structure is (\d+) commits? behind/.exec(n)?.[1] ?? 0);
+    return behind >= CAVEAT_AT_COMMITS;
+  });
+  if (!keep.length) return '';
+  return '\n' + keep.slice(0, 2).map((n) => `! ${n.length > 180 ? `${n.slice(0, 177)}…` : n}`).join('\n');
+}
+
 /**
  * The names in a prompt that are unmistakably CODE, in the order they appear.
  *

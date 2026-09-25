@@ -59,7 +59,10 @@ export function fuse(
 
     const signals: string[] = [];
     if (c.relevance !== undefined) signals.push(`semantic ${relevance.toFixed(2)}`);
-    if (callers) signals.push(`${callers} caller${callers === 1 ? '' : 's'}`);
+    // "found", not a total: the graph is static and misses some callers — an
+    // independent benchmark measured GitNexus at 0.875 of real caller files on
+    // TypeScript. A bare "24 callers" tells the reader there is no 25th to find.
+    if (callers) signals.push(`${callers} caller${callers === 1 ? '' : 's'} found`);
     if (flows) signals.push(`on ${flows} flow${flows === 1 ? '' : 's'}`);
     if (hood?.risk) signals.push(`risk ${hood.risk}`);
     if (!signals.length) signals.push(`${c.source} only`);

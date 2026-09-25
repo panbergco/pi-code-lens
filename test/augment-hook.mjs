@@ -37,12 +37,13 @@ writeFileSync(join(repo, '.code-lens', 'settings.json'), JSON.stringify({ timeou
 let answer = null;          // what the lens "finds"
 let calls = [];             // questions actually asked
 let delayMs = 0;            // how slow the engines are
+let stubNotes = [];         // what the pipeline says about its own freshness
 globalThis.fetch = async (url, init) => {
   const body = JSON.parse(init?.body ?? '{}');
   calls.push(body.question);
   if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
   const spots = answer ? [answer] : [];
-  return { ok: true, json: async () => ({ spots, ms: 12, notes: [], plan: { intent: 'breaks' } }) };
+  return { ok: true, json: async () => ({ spots, ms: 12, notes: stubNotes, plan: { intent: 'breaks' } }) };
 };
 
 const structural = { file: 'src/lane.ts', line: 88, symbol: 'writeLane', score: 1, signals: ['semantic 1.00', '3 callers'], breaks: ['flow: deliver'], source: 'graph' };
@@ -71,7 +72,7 @@ const result = (over = {}) => ({
 });
 const run = (over) => handlers.tool_result(result(over), ctx);
 const textOf = (r) => (r?.content ?? []).map((c) => c.text ?? '').join('');
-const reset = () => { calls = []; answer = structural; delayMs = 0; };
+const reset = () => { calls = []; answer = structural; delayMs = 0; stubNotes = []; };
 
 // ── the search comes back carrying what the index knows ─────────────────────
 reset();
@@ -79,6 +80,17 @@ let out = await run();
 assert.ok(textOf(out).includes('what the index knows about "writeLane"'), 'the answer is appended');
 assert.ok(textOf(out).includes('3 callers'), 'and it carries the structure');
 assert.ok(textOf(out).startsWith(grepOutput), 'the search output itself is never replaced');
+
+// ── the index's own warning travels with the answer ────────────────────────
+// Read only to decide on silence before, so a stale answer looked like a fresh one.
+reset();
+stubNotes = ['structure is being rebuilt right now — callers may be missing; ask again in a moment'];
+out = await run({ input: { command: 'grep -rn staleSubject src' } });
+assert.match(textOf(out), /! structure is being rebuilt right now/, 'a rebuild in flight is stated on the answer itself');
+reset();
+stubNotes = ['structure is 1 commit behind HEAD (indexed abc)'];
+out = await run({ input: { command: 'grep -rn freshSubject src' } });
+assert.ok(textOf(out).includes('freshSubject') && !/behind HEAD/.test(textOf(out)), 'but routine one-commit lag adds no noise');
 
 // ── a subject is answered once, until the answer has left the reader ───────
 // repeatAfterMinutes is 0 here, so the memory expires immediately and the same
