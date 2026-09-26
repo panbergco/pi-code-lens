@@ -182,11 +182,12 @@ assert.equal(minGapMs(), 0, 'a repo never measured is due now');
   const at = (mins) => () => Date.parse('2026-09-02T00:00:00Z') + mins * 60_000;
 
   resetHealState();
-  assert.equal(healIfStale('/repo', HEAL_AT_COMMITS - 1, { now: at(0), spawnFn }), undefined,
+  const go = () => 'go';   // this machine's real index passes must not decide the test
+  assert.equal(healIfStale('/repo', HEAL_AT_COMMITS - 1, { now: at(0), spawnFn, verdict: go }), undefined,
     'a nearly-current index is left alone');
   assert.deepEqual(spawned, [], 'and costs no rebuild');
 
-  const note = healIfStale('/repo', 42, { now: at(0), spawnFn });
+  const note = healIfStale('/repo', 42, { now: at(0), spawnFn, verdict: go });
   assert.match(String(note), /42 commits behind/, 'a lagging index says it is repairing itself');
   assert.equal(spawned.length, 1, 'exactly one rebuild is started');
   assert.ok(spawned[0].args.includes('--graph-only'),
@@ -195,10 +196,20 @@ assert.equal(minGapMs(), 0, 'a repo never measured is due now');
   assert.ok(repoFlag > 0 && spawned[0].args[repoFlag + 1] === 'repo',
     'and only the repository that was read — without --repo it walked all fifteen to heal one');
 
-  healIfStale('/repo', 99, { now: at(1), spawnFn });
+  healIfStale('/repo', 99, { now: at(1), spawnFn, verdict: go });
   assert.equal(spawned.length, 1, 'a second question a minute later does not queue a second pass');
-  healIfStale('/other', 99, { now: at(1), spawnFn });
+  healIfStale('/other', 99, { now: at(1), spawnFn, verdict: go });
   assert.equal(spawned.length, 1, 'nor does a different repo while one is still in flight');
+
+  // A refresh that would refuse to start is not announced as rebuilding. It
+  // was: the note went out while the pass it launched skipped itself.
+  resetHealState();
+  const launchedBefore = spawned.length;
+  assert.equal(healIfStale('/blocked', 99, { now: at(0), spawnFn, verdict: () => 'wait' }), undefined,
+    'blocked by another pass: nothing is launched and nothing is claimed');
+  assert.equal(spawned.length, launchedBefore, 'no process was started');
+  assert.match(healIfStale('/stalled', 99, { now: at(0), spawnFn, verdict: () => 'stalled' }) ?? '', /rebuilding/,
+    'a stalled semantic pass does not block the graph rebuild, so that one is launched');
 }
 
 

@@ -25,6 +25,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
+import { passVerdict, runningPass } from '../commands/refresh.js';
 
 /**
  * Files whose bytes moved since the index was written — the drift a commit count
@@ -71,7 +72,7 @@ const lastHeal = new Map<string, number>();
 let inFlight = 0;
 
 /** Test seam: what has been kicked off, without spawning anything. */
-export interface HealHooks { now?: () => number; spawnFn?: typeof spawn }
+export interface HealHooks { now?: () => number; spawnFn?: typeof spawn; verdict?: () => 'go' | 'wait' | 'stalled' }
 
 /**
  * Kick a background graph rebuild if this read found the index too far behind.
@@ -88,6 +89,11 @@ export function healIfStale(
   // One at a time across every repo: these passes are CPU-bound and the machine
   // is shared with the agents asking the questions.
   if (inFlight > 0) return undefined;
+  // A refresh that will refuse to start must not be announced as rebuilding.
+  // It was: "rebuilding in the background" went out while the pass it launched
+  // skipped itself behind another index pass. The block is reported on its own
+  // (refresh-health), so the honest thing here is to launch nothing and say nothing.
+  if ((hooks.verdict ?? (() => passVerdict(runningPass())))() === 'wait') return undefined;
   lastHeal.set(cwd, now);
   inFlight++;
   try {

@@ -6,6 +6,7 @@
  * gains a capability the lens has never seen. A parity check that cannot fail
  * is decoration.
  */
+import { allRefreshProblems } from '../core/refresh-health.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { GraphEngine } from '../engines/graph.js';
@@ -111,6 +112,7 @@ export async function doctor(opts: { parity?: boolean; json?: boolean } = {}): P
     npu,
     hotLoaded: { semantic: Boolean(res.semantic), graph: Boolean(res.graph) },
     parity: opts.parity ? parity(caps, sCaps, capErr) : undefined,
+    refresh: allRefreshProblems(),
   };
 
   if (opts.json) { console.log(JSON.stringify(report, null, 2)); }
@@ -119,7 +121,10 @@ export async function doctor(opts: { parity?: boolean; json?: boolean } = {}): P
   const failed =
     !report.engines.graph.up ||
     !report.engines.semantic.up ||
-    (opts.parity && report.parity && !report.parity.ok);
+    (opts.parity && report.parity && !report.parity.ok) ||
+    // An index that has stopped being kept current is a failure of this tool,
+    // not a footnote: it answered for eight days as if it were fine.
+    report.refresh.length > 0;
   return failed ? 1 : 0;
 }
 
@@ -144,6 +149,10 @@ function parity(graphCaps: string[], semCaps: string[], err?: string) {
 function print(r: any): void {
   const mark = (b: boolean) => (b ? '✓' : '✗');
   console.log('code-lens doctor\n');
+  console.log('Index refresh');
+  if (!r.refresh.length) console.log('  ✓ every indexed repository is being kept current');
+  for (const line of r.refresh) console.log(`  ✗ ${line}`);
+  console.log('');
   console.log('Engines');
   for (const id of ['semantic', 'graph'] as const) {
     const e = r.engines[id];

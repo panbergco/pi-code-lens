@@ -3,6 +3,7 @@
  * all run the SAME code. Three copies of routing and fusion would drift, and
  * the one that drifts is always the one an agent is actually using.
  */
+import { refreshProblems } from './refresh-health.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -191,6 +192,16 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
  * already sees uncommitted work.
  */
 export function staleness(cwd: string): string | undefined {
+  // A failing or blocked refresh is said first and regardless of lag: "3 commits
+  // behind" reads as "catching up", and for eight days it meant "never will".
+  // Only for a repository that HAS an index: nothing is being kept current otherwise.
+  if (!existsSync(join(cwd, '.gitnexus', 'meta.json'))) return undefined;
+  const problems = refreshProblems(cwd);
+  const lag = commitLag(cwd);
+  return [...problems, ...(lag ? [lag] : [])].join(' · ') || undefined;
+}
+
+function commitLag(cwd: string): string | undefined {
   try {
     const meta = join(cwd, '.gitnexus', 'meta.json');
     if (!existsSync(meta)) return undefined;

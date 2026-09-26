@@ -3,6 +3,8 @@
  * about code that no longer exists, so it gets a real git repository rather
  * than a mocked one: the failure mode being guarded is a wrong commit count.
  */
+// This machine's own refresh state must not leak into the expected notes.
+process.env.HOME = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'lens-stale-home-'));
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';

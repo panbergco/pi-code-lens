@@ -45,6 +45,7 @@ import { Type } from "typebox";
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
 import { answersFile, foundNothing, freshnessCaveat, promptSubjects, repoRoot, searchDir, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
+import { refreshProblems } from "../src/core/refresh-health.js";
 import { recordDelivery } from "../src/core/deliveries.js";
 import { savingsLine } from "../src/core/savings.js";
 import { render } from "../src/core/fuse.js";
@@ -603,17 +604,36 @@ export default function piCodeLens(pi: ExtensionAPI) {
     },
   });
 
+  /** A failing or blocked refresh on the status bar, where a person sees it
+   *  without asking. Two small file reads: cheap enough for every turn. */
+  function showRefreshHealth(ctx: ExtensionContext): void {
+    const p = refreshProblems(ctx.cwd);
+    ctx.ui.setStatus("lens-health", p.length
+      ? `⚠ lens: ${p.map((l) => {
+          const fail = /index (\w+) rebuild FAILING .*?\((\d+)×/.exec(l);
+          if (fail) return `${fail[1]} rebuild failing ×${fail[2]}`;
+          const blocked = /refresh BLOCKED for ([^(]+)\(/.exec(l);
+          return blocked ? `refresh blocked ${blocked[1]!.trim()}` : "refresh problem";
+        }).join(" · ")} — /lens status`
+      : undefined);
+  }
+
   async function status(ctx: ExtensionContext & { ui: any }): Promise<void> {
     const hot = await serverUp();
     const g = await getEngines(ctx.cwd).graph.healthCached(0).catch(() => null);
     const here = ctx.cwd.split("/").pop() ?? "";
     const f = freshness(ctx.cwd);
+    // "Auto-refresh will catch up" was printed for eight days while every
+    // refresh of this repository failed. Only say it when nothing is wrong.
+    const problems = refreshProblems(ctx.cwd);
     const fresh =
       f.state === "fresh" ? `indexed · up to date (${f.commit})`
-      : f.state === "stale" ? `indexed · STALE — ${f.behind} commit${f.behind === 1 ? "" : "s"} behind (auto-refresh will catch up; or say the word)`
+      : f.state === "stale" ? `indexed · STALE — ${f.behind} commit${f.behind === 1 ? "" : "s"} behind` +
+                              (problems.length ? "" : " (auto-refresh will catch up; or say the word)")
       : f.state === "refreshing" ? "reindexing now…"
       : "NOT graph-indexed — run `gitnexus analyze` here once; until then answers degrade with named notes";
     const lines = [
+      ...problems.map((p) => `✗ ${p}`),
       `hot server (:${process.env.LENS_PORT ?? 3939}): ${hot ? "up — answers come from the shared warm service" : "down — falling back in-process (still thin clients)"}`,
       g
         ? `graph engine: ${g.up ? `up · repos: ${g.repos.join(", ") || "none indexed"}` : "unreachable"}`
@@ -634,6 +654,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
   // and never mentioned. So re-state the rule per turn, and only when it is genuinely absent,
   // to avoid paying for the same instruction twice.
   pi.on("before_agent_start", async (event, ctx) => {
+    if (ctx.mode === "tui") showRefreshHealth(ctx);
     const active = pi.getActiveTools();
     const tools = LENS_TOOLS.filter((t) => active.includes(t));
     if (!tools.length) return;
@@ -1173,6 +1194,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
   // background. Deferred so startup never blocks on git probes.
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui") return;
+    showRefreshHealth(ctx);
     setTimeout(() => {
       // Through the same gate as a stale read: several commits behind, a
       // cooldown, one pass at a time, graph only. This used to start a FULL

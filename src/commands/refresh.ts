@@ -17,12 +17,13 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { GraphEngine } from '../engines/graph.js';
 import { cccEnv } from '../engines/semantic.js';
+import { ago, clearBlocked, failureReason, noteFailure, recordBlocked, type Failing } from '../core/refresh-health.js';
 
 const run = promisify(execFile);
 const STATE = join(homedir(), '.code-lens', 'refresh-state.json');
@@ -48,6 +49,10 @@ export interface RepoState {
    *  a large monorepo: 99,518 basic blocks built by hand were gone by the next
    *  cycle, twice. Intent is recorded, and only an operator lowers it. */
   wantPdg?: boolean;
+  /** Layers whose rebuild is failing, cleared on the next success. Always
+   *  written as a whole object: saving merges per repo, so a key that is
+   *  deleted rather than cleared comes back from disk. */
+  failing?: { graph?: Failing; semantic?: Failing };
 }
 
 /**
@@ -195,6 +200,40 @@ export function graphUpToDate(dir: string): boolean {
       ':(exclude).cursor', ':(exclude).cursor/**', ':(exclude)AGENTS.md', ':(exclude)CLAUDE.md',
       ':(exclude).agents', ':(exclude).agents/**']).trim() === '';
   } catch { return false; }
+}
+
+/** A semantic pass this old without finishing is stalled, not busy: measured,
+ *  one sat on its last 8 of 1,160 files for 1 h 26 min with its daemon idle,
+ *  and the machine-wide guard skipped every repository's refresh meanwhile. */
+export const STALLED_MS = 30 * 60_000;
+
+/** The index pass in flight, with enough about it to say what is blocking. */
+export function runningPass(): { engine: string; pid: number; ageMs: number; where: string } | null {
+  // A test states that nothing is indexing; this machine's real passes must not decide it.
+  if (process.env.LENS_TEST_NO_PASS) return null;
+  const passes = [
+    ['(^|/)ccc +index', 'semantic'],
+    ['(^|/)gitnexus +analyze', 'graph'],
+    ['(^|/)gitnexus +embeddings', 'graph vector'],
+  ] as const;
+  for (const [pat, engine] of passes) {
+    let pid = 0;
+    try { pid = Number(execFileSync('pgrep', ['-of', pat], { encoding: 'utf8', stdio: 'pipe', timeout: 5_000 }).trim()); }
+    catch { continue; }
+    if (!pid) continue;
+    let ageMs = 0, where = '?';
+    try { ageMs = Number(execFileSync('ps', ['-o', 'etimes=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000 }).trim()) * 1000; } catch { /* gone */ }
+    try { where = basename(readlinkSync(`/proc/${pid}/cwd`)); } catch { /* not ours to read */ }
+    return { engine, pid, ageMs, where };
+  }
+  return null;
+}
+
+/** What a pass in flight means for this refresh: wait for it, or treat it as
+ *  stalled and carry on with the graph (a semantic pass past STALLED_MS). */
+export function passVerdict(pass: { engine: string; ageMs: number } | null): 'go' | 'wait' | 'stalled' {
+  if (!pass) return 'go';
+  return pass.engine === 'semantic' && pass.ageMs > STALLED_MS ? 'stalled' : 'wait';
 }
 
 export function indexRunning(): string | null {
@@ -372,11 +411,25 @@ export interface RefreshOpts {
 export async function refresh(o: RefreshOpts = {}): Promise<number> {
   const applied = loadEngineEnv();
   if (applied.length) console.log(`engine config: ${applied.length} settings from ${ENGINE_ENV}`);
-  const busy = indexRunning();
-  if (busy) {
-    console.log(`skipped: the ${busy} engine is already indexing — refusing to start a second pass`);
+  const busy = runningPass();
+  const verdict = passVerdict(busy);
+  if (busy && verdict === 'wait') {
+    // Skipping is right; skipping SILENTLY was not. Written down, so every
+    // freshness surface can say the refresh is blocked, by what, for how long.
+    const why = `a ${busy.engine} index pass (pid ${busy.pid}, in ${busy.where}) has been running ${ago(busy.ageMs)}`;
+    recordBlocked(why);
+    console.log(`skipped: ${why} — refusing to start a second pass`);
     return 0;
   }
+  if (busy && verdict === 'stalled') {
+    // A stalled semantic pass must not freeze every graph. Graph rebuilds do not
+    // touch its files; only a second semantic pass would, so that alone waits.
+    const why = `a semantic index pass (pid ${busy.pid}, in ${busy.where}) has run ${ago(busy.ageMs)} without finishing — ` +
+                `likely stalled; semantic refresh waits, graph rebuilds continue`;
+    recordBlocked(why);
+    console.log(`warning: ${why}`);
+    o = { ...o, graphOnly: true };
+  } else clearBlocked();
   // A lock is only meaningful while its holder is alive. A refresh killed mid-run
   // (timeout, reboot, Ctrl-C) leaves the file behind, and a naive existence check
   // then skips EVERY future run, silently and forever — failing closed and quiet,
@@ -456,15 +509,20 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
               st.graphMs = Date.now() - t0;
               st.graphAt = Date.now();
               st.scopeHash = hash;
+              st.failing = { ...st.failing, graph: undefined };
               console.log(`  graph: updated in ${(st.graphMs / 1000).toFixed(1)}s (${nodes} nodes)`);
             } catch (e) {
               // Keep the WHOLE error. The first 90 characters of this one read
               // "COPY failed for File: Ru" — enough to know it broke, not enough
               // to know why, and engine failures are rare enough to afford the
               // bytes. Noise from the engine's JSON logging is dropped instead.
-              const msg = String((e as Error).message)
-                .split('\n').filter((l) => !l.includes('"level":30')).join(' ').slice(0, 400);
-              console.log(`  graph: FAILED — ${msg}`);
+              //
+              // Not enough, as it turned out: warnings filled all 400 characters
+              // and the reason never reached the log. The reason is extracted
+              // now, and kept where every freshness surface will show it.
+              const reason = failureReason(e);
+              st.failing = { ...st.failing, graph: noteFailure(st.failing?.graph, reason) };
+              console.log(`  graph: FAILED (${st.failing.graph!.count}× in a row) — ${reason}`);
             }
           }
         }
@@ -491,8 +549,11 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
             console.log(`  semantic: updated in ${((Date.now() - t0) / 1000).toFixed(0)}s (${n} files added)`);
             st.semanticCommit = commit ?? undefined;
             st.semanticAt = Date.now();
+            st.failing = { ...st.failing, semantic: undefined };
           } catch (e) {
-            console.log(`  semantic: FAILED — ${String((e as Error).message).slice(0, 90)}`);
+            const reason = failureReason(e);
+            st.failing = { ...st.failing, semantic: noteFailure(st.failing?.semantic, reason) };
+            console.log(`  semantic: FAILED (${st.failing.semantic!.count}× in a row) — ${reason}`);
           }
         }
       }

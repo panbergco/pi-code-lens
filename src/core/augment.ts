@@ -317,13 +317,15 @@ export const CAVEAT_AT_COMMITS = 5;
  * answer arrived looking exactly like a fresh one. Kept to two short lines.
  */
 export function freshnessCaveat(notes: string[]): string {
-  const keep = notes.filter((n) => {
-    if (/being rebuilt|edited since indexing|no longer in this branch/i.test(n)) return true;
+  // One note can carry several facts joined by " · " (lag, then edited files,
+  // then a failing rebuild); judge and show each on its own line.
+  const keep = notes.flatMap((n) => n.split(' · ')).filter((n) => {
+    if (/being rebuilt|edited since indexing|no longer in this branch|FAILING|BLOCKED/.test(n)) return true;
     const behind = Number(/structure is (\d+) commits? behind/.exec(n)?.[1] ?? 0);
     return behind >= CAVEAT_AT_COMMITS;
   });
   if (!keep.length) return '';
-  return '\n' + keep.slice(0, 2).map((n) => `! ${n.length > 180 ? `${n.slice(0, 177)}…` : n}`).join('\n');
+  return '\n' + keep.slice(0, 2).map((n) => `! ${n.length > 240 ? `${n.slice(0, 237)}…` : n}`).join('\n');
 }
 
 /**
