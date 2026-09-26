@@ -236,6 +236,53 @@ export function passVerdict(pass: { engine: string; ageMs: number } | null): 'go
   return pass.engine === 'semantic' && pass.ageMs > STALLED_MS ? 'stalled' : 'wait';
 }
 
+/** How long `ccc index` may show the same progress before it is stalled. */
+export const CCC_STALL_MS = 10 * 60_000;
+
+/** ccc's own progress line for a repository, or '' when nothing is indexing. */
+async function cccProgress(dir: string): Promise<string> {
+  try {
+    const { stdout } = await run('ccc', ['status'], { cwd: dir, timeout: 30_000, env: cccEnv() });
+    return /Indexing in progress: (.*)/.exec(stdout)?.[1]?.trim() ?? '';
+  } catch { return 'status unavailable'; }   // a wedged daemon counts as no progress
+}
+
+/**
+ * `ccc index`, bounded by PROGRESS rather than only by a 4-hour timeout.
+ *
+ * Measured twice in one day: a pass sat on its last 8 of 1,160 files (1,152
+ * unchanged, 0 added) with the daemon idle — 1 h 26 min, then 37+ min — holding
+ * the machine-wide refresh lock the whole time. The stuck job lived INSIDE the
+ * daemon: killing the client left it there, and the next pass attached to it
+ * and hung again; only a daemon restart cleared it. So a pass whose progress
+ * line has not moved for `stallMs` is killed, the daemon is restarted (with the
+ * GPU-safe environment — a restart from a shell carrying an empty
+ * CUDA_VISIBLE_DEVICES leaves it blind to the GPU), and the failure is raised
+ * for the caller to record.
+ */
+export async function cccIndexWatched(dir: string, stallMs = CCC_STALL_MS, pollMs = 60_000) {
+  const job = run('ccc', ['index'], { cwd: dir, timeout: 14_400_000, maxBuffer: 32 << 20, env: cccEnv() });
+  let last: string | undefined, since = Date.now(), stalled = '';
+  const timer = setInterval(() => {
+    void cccProgress(dir).then((line) => {
+      if (stalled) return;
+      if (line !== last) { last = line; since = Date.now(); return; }
+      if (line && Date.now() - since >= stallMs) { stalled = line; job.child.kill('SIGTERM'); }
+    });
+  }, pollMs);
+  try {
+    return await job;
+  } catch (e) {
+    if (!stalled) throw e;
+    let restarted = 'ccc daemon restarted';
+    try { await run('ccc', ['daemon', 'restart'], { cwd: dir, timeout: 120_000, env: cccEnv() }); }
+    catch { restarted = 'ccc daemon restart FAILED'; }
+    throw new Error(`stalled: no progress for ${ago(stallMs)} (${stalled}) — pass stopped; ${restarted}`);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 export function indexRunning(): string | null {
   // Anchored to the BINARY, not to a mention. An unanchored pattern matches any
   // process whose command line merely contains the words — a shell running
@@ -555,8 +602,7 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
             // Same rule as the query path: the graph engine's empty GPU mask
             // must not reach ccc, or the daemon this starts is blind to the GPU
             // for its whole life (see cccEnv).
-            const { stdout } = await run('ccc', ['index'],
-              { cwd: r.dir, timeout: 14_400_000, maxBuffer: 32 << 20, env: cccEnv() });
+            const { stdout } = await cccIndexWatched(r.dir);
             const n = /(\d+)\s+added/.exec(stdout)?.[1] ?? '?';
             console.log(`  semantic: updated in ${((Date.now() - t0) / 1000).toFixed(0)}s (${n} files added)`);
             st.semanticCommit = commit ?? undefined;

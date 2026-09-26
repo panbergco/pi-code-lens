@@ -134,7 +134,10 @@ async function runRefresh(ctx: ExtensionContext, reason: string): Promise<void> 
   const repo = ctx.cwd.split("/").pop() ?? "";
   ctx.ui.setStatus("lens", `⟳ lens reindex (${reason})`);
   try {
-    await captureOutput(() => refresh({ repo }));
+    // Graph only. The semantic pass belongs to the scheduled service: run in
+    // here it held the machine-wide refresh lock inside someone's agent for as
+    // long as it hung (37+ min, timeout 4 h), and no repository refreshed.
+    await captureOutput(() => refresh({ repo, graphOnly: true }));
   } catch (e) {
     ctx.ui.notify(`lens refresh failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`, "warning");
   } finally {
