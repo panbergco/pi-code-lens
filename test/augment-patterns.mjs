@@ -186,3 +186,31 @@ console.log('ok — a prompt is asked about only the code it names');
     `a static graph reports callers it found, not all there are (got ${spots[0].signals})`);
 }
 console.log('ok — automatic answers carry their caveats, and counts say "found"');
+
+
+// ── a name taken from a path asks about that file (#12) ─────────────────────
+{
+  const { answersFile, subjectsForSearch, promptSubjects } = await import('../dist/core/augment.js');
+  assert.ok(answersFile('fleet', 'packages/core/src/fleet.ts'), 'a spot in the named file answers it');
+  assert.ok(answersFile('lane-mint', 'src/Lane-Mint.mjs'), 'case and extension do not matter');
+  assert.ok(!answersFile('fleet', 'packages/core/src/time-decomposition.ts'),
+    'a same-named symbol in another file does not — live, it answered for fleet.ts with callers and code');
+  assert.ok(!answersFile('fleet', 'fleet'),
+    'and a bare-name answer, which carries no location, cannot vouch for a file (the live failure of the first fix)');
+
+  const mem = () => ({ answered: new Set(), unanswerable: new Set() });
+  let files = new Set();
+  const subs = subjectsForSearch('bash', { command: 'grep -rn "claimSlice" packages/core/src' },
+    'packages/core/src/fleet.ts:747:export function claimSlice(', mem(), 3, files);
+  assert.deepEqual(subs, ['claimSlice', 'fleet']);
+  assert.deepEqual([...files], ['fleet'], 'the pattern is a symbol, the hit\'s file name is a file');
+
+  files = new Set();
+  subjectsForSearch('read', { path: '/r/src/core/augment.ts' }, 'x'.repeat(80), mem(), 3, files);
+  assert.deepEqual([...files], ['augment'], 'a file that was opened is a file');
+
+  files = new Set();
+  promptSubjects('look at packages/core/src/lane-mint.ts and claimSlice', 2, files);
+  assert.deepEqual([...files], ['lane-mint'], 'in a prompt too; a camelCase name stays a symbol');
+}
+console.log('ok — a name taken from a path is answered only from that file');

@@ -246,6 +246,8 @@ rmSync(repo, { recursive: true, force: true });
     toolName: 'edit', input: { path }, content: [{ type: 'text', text: 'ok' }], isError: false, ...over,
   }, ctx);
 
+  // The file is named for the symbol it holds, and the index places it there.
+  answer = { ...structural, file: 'packages/core/src/writeLane.ts' };
   const out = await edit('/repo/packages/core/src/writeLane.ts');
   assert.match(textOf(out), /you just changed "writeLane"; this depends on it/,
     'an edited symbol is met with who depends on it');
@@ -257,6 +259,15 @@ rmSync(repo, { recursive: true, force: true });
   // At the shipped default (30 min) an edit loop stays quiet after the first.
   assert.notEqual(await edit('/repo/packages/core/src/writeLane.ts'), undefined,
     'with no repeat window, a later save is answered again');
+
+  // #12: the edited FILE is the subject. A same-named symbol in another file is
+  // different code — live, editing src/core/augment.ts was answered with a
+  // variable called \`augment\` in extensions/index.ts, callers and all.
+  reset();
+  answer = { ...structural, symbol: 'augment', file: 'extensions/index.ts', line: 310 };
+  const wrong = await edit('/repo/src/core/augment.ts');
+  assert.ok(!/extensions\/index\.ts:310|index\.ts/.test(textOf(wrong)),
+    `a same-named symbol elsewhere never answers for the edited file (got: ${textOf(wrong).slice(0, 160)})`);
 
   assert.equal(await edit('/repo/docs/notes.md'), undefined, 'a non-code file has no blast radius');
   assert.equal(await edit('/repo/packages/core/src/store.ts', { isError: true }), undefined,
@@ -346,7 +357,8 @@ console.log('ok — a session start or reload no longer rebuilds a repository on
   reset(); await handlers.before_agent_start({ prompt: 'where does the lane grant get refused?', systemPrompt: 'x' }, ctx);
   reset(); answer = { ...structural, symbol: 'packedSymbol', file: 'src/packed.ts', line: 7 };   // a spot not shown before
   await handlers.before_agent_start({ prompt: 'what calls packedSymbol now?', systemPrompt: 'x' }, ctx);
-  reset(); await handlers.tool_result({ toolName: 'edit', input: { path: '/r/src/editedThing.ts' },
+  reset(); answer = { ...structural, file: 'src/editedThing.ts' };
+  await handlers.tool_result({ toolName: 'edit', input: { path: '/r/src/editedThing.ts' },
     content: [{ type: 'text', text: 'ok' }], isError: false }, ctx);
   const logged = readDeliveries(repo, since, repo);        // HOME is the fixture repo in this suite
   const has = (channel, outcome, reason) => logged.some((d) =>

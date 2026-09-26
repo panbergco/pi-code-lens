@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
-import { foundNothing, freshnessCaveat, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
+import { answersFile, foundNothing, freshnessCaveat, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
 import { recordDelivery } from "../src/core/deliveries.js";
 import { savingsLine } from "../src/core/savings.js";
@@ -781,7 +781,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // is why this channel delivered zero while the graph held 7 importers for
     // dataset.ts and 8 for proof.ts. Ask about the symbol when the name is one,
     // and about the file otherwise.
-    let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens);
+    let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens, true);
     if (!answer) {
       const importers = await graphEngine().importersOf(symbol, await repoOf(ctx.cwd), 6);
       if (!importers.length) {   // nothing depends on it: nothing to warn about
@@ -833,8 +833,9 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // about the command, not about the code.
     const empty = foundNothing(text, Boolean(event.isError));
     if (event.isError && !empty) return;   // the command itself failed
+    const fileSubjects = new Set<string>();
     const subjects = subjectsForSearch(event.toolName, input, text,
-      recall(), settings.maxSubjects);
+      recall(), settings.maxSubjects, fileSubjects);
     if (!subjects.length) {
       // Held back on purpose is still a decision, and the biggest group of
       // "misses" in every measurement so far: say so in the log, by name.
@@ -869,7 +870,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     for (const subject of subjects) {
       if (Date.now() >= deadline) { trace("time spent"); break; }
       if (left < 60) { trace("budget spent"); break; }   // too little room to say anything useful
-      const answer = await answerFor(subject, ctx.cwd, deadline - Date.now(), left);
+      const answer = await answerFor(subject, ctx.cwd, deadline - Date.now(), left, fileSubjects.has(subject.toLowerCase()));
       if (!answer) continue;
       found.push(answer);
       left -= estimateTokens(answer.body);
@@ -996,12 +997,13 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // a question, routes prose to recall-plus-structure at 430-550 ms, and the
     // wall is 400: six real prompts replayed, six misses, one pack in three
     // hours. A named symbol takes the structural path alone at ~212 ms.
-    const subjects = promptSubjects(q, 2);
+    const fileSubjects = new Set<string>();
+    const subjects = promptSubjects(q, 2, fileSubjects);
     if (!subjects.length) { trace("prompt: names no code", q.slice(0, 60)); return { why: "names no code" }; }
     try {
       let answer: Awaited<ReturnType<typeof answerFor>>;
       for (const s of subjects) {
-        answer = await answerFor(s, cwd, settings.timeoutMs, settings.budgetTokens);
+        answer = await answerFor(s, cwd, settings.timeoutMs, settings.budgetTokens, fileSubjects.has(s.toLowerCase()));
         if (answer) break;
       }
       if (!answer) {
@@ -1036,7 +1038,8 @@ export default function piCodeLens(pi: ExtensionAPI) {
   /** Why the last answerFor() came back empty, for the delivery log. */
   let lastSilence = "";
 
-  async function answerFor(subject: string, cwd: string, budgetMs = settings.timeoutMs, budgetTokens = settings.budgetTokens) {
+  async function answerFor(subject: string, cwd: string, budgetMs = settings.timeoutMs, budgetTokens = settings.budgetTokens,
+                           isFile = false) {
     const key = subject.toLowerCase();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -1065,8 +1068,11 @@ export default function piCodeLens(pi: ExtensionAPI) {
       // already has the text matches, so a purely textual answer is worthless
       // here — and so is a bare risk label, which is a verdict without the
       // evidence behind it. Callers and flows are the knowledge grep cannot get.
+      // A subject that names a FILE is answered only from that file: a same-named
+      // symbol elsewhere is a confident answer about different code (#12).
       const structural = result.spots.filter((s) =>
-        s.signals.some((sig) => /caller|flow/i.test(sig)) || s.breaks.length > 0);
+        (s.signals.some((sig) => /caller|flow/i.test(sig)) || s.breaks.length > 0) &&
+        (!isFile || answersFile(subject, s.file)));
       if (!structural.length) {
         // A name with no callers may still be a FILE, and the graph knows what
         // imports it. A large share of what agents search for is module-shaped

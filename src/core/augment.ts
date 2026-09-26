@@ -132,6 +132,31 @@ export function symbolFromPath(path: string): string | null {
  * useless enrichment costs context and teaches the agent to ignore the block.
  */
 export function searchSubject(toolName: string, input: Record<string, unknown>): string | null {
+  return searchSubjectOf(toolName, input)?.subject ?? null;
+}
+
+/**
+ * Whether a spot the index returned actually answers a subject that NAMES A FILE.
+ *
+ * A name taken from a path (`augment` from src/core/augment.ts, `fleet` from a
+ * grep hit in fleet.ts) is a question about that file. Asked as a bare name,
+ * the index happily answers about any symbol spelled the same way elsewhere —
+ * a variable called `augment` in another file, a function called `fleet` in
+ * time-decomposition.ts — with callers, code and full confidence. Only a spot
+ * PROVABLY located in the named file counts; otherwise the file's importers are
+ * the answer.
+ *
+ * "Provably" means a real path. A bare-name answer comes back with the name in
+ * the file field and its callers aggregated from whichever same-named node won,
+ * so it can never vouch for a file — the first version of this check compared
+ * `fleet` with `fleet`, passed, and shipped the wrong answer live.
+ */
+export function answersFile(subject: string, spotFile: string): boolean {
+  if (!/\/|\.\w+$/.test(spotFile)) return false;
+  return basename(spotFile).replace(/\.\w+$/, '').toLowerCase() === subject.toLowerCase();
+}
+
+function searchSubjectOf(toolName: string, input: Record<string, unknown>): { subject: string; origin: 'pattern' | 'path' } | null {
   let subject: string | null = null;
   // `read`, `find` and file-reading shell commands name a path that exists;
   // `grep` names a guess. Only the guess has to prove it looks like code.
@@ -153,7 +178,7 @@ export function searchSubject(toolName: string, input: Record<string, unknown>):
     if (found) { subject = found.subject; origin = found.origin; }
   }
 
-  return subject && isUsefulSubject(subject, origin) ? subject : null;
+  return subject && isUsefulSubject(subject, origin) ? { subject, origin } : null;
 }
 
 function subjectFromShell(command: string): { subject: string; origin: 'pattern' | 'path' } | null {
@@ -268,12 +293,13 @@ export function freshnessCaveat(notes: string[]): string {
  * a source extension. A plain English word is never enough — "sprint" and
  * "check" are also symbols, and a pack about them answers nothing asked.
  */
-export function promptSubjects(prompt: string, max = 2): string[] {
+export function promptSubjects(prompt: string, max = 2, files?: Set<string>): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  const keep = (name: string | null) => {
+  const keep = (name: string | null, isFile = false) => {
     if (!name || !isUsefulSubject(name) || seen.has(name.toLowerCase())) return;
     seen.add(name.toLowerCase()); out.push(name);
+    if (isFile) files?.add(name.toLowerCase());
   };
   // Backticks first: the writer marked these as code themselves.
   for (const m of prompt.matchAll(/`([^`\n]{3,80})`/g)) {
@@ -282,9 +308,9 @@ export function promptSubjects(prompt: string, max = 2): string[] {
     // Hyphens included: a module named `lane-mint` is exactly what people
     // backtick, and the identifier-only rule dropped it (found by the KPI's own
     // test, which the graph answers with that file's importers).
-    keep(path ? symbolFromPath(path[0]) : (/^[A-Za-z_][\w-]*$/.test(inner) ? inner : null));
+    keep(path ? symbolFromPath(path[0]) : (/^[A-Za-z_][\w-]*$/.test(inner) ? inner : null), Boolean(path));
   }
-  for (const m of prompt.matchAll(/[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/g)) keep(symbolFromPath(m[0]));
+  for (const m of prompt.matchAll(/[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|php|swift|kt)\b/g)) keep(symbolFromPath(m[0]), true);
   for (const m of prompt.matchAll(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g)) {
     const w = m[0];
     if (/[a-z][A-Z]/.test(w) || /[A-Za-z]_[A-Za-z]/.test(w)) keep(w);
@@ -330,6 +356,8 @@ export function subjectsForSearch(
   outputText: string,
   memory: SubjectMemory,
   max = 3,
+  /** Filled with the (lower-cased) subjects that name a file, not a symbol. */
+  files?: Set<string>,
 ): string[] {
   if (!SEARCH_TOOLS.has(toolName)) return [];
   // An empty result is a question, not the absence of one — but only when the
@@ -339,10 +367,15 @@ export function subjectsForSearch(
   // Never answer the lens answering itself.
   if (/(^|\s|\/)lens(\.mjs)?\s/.test(String(input.command ?? ''))) return [];
 
-  const primary = searchSubject(toolName, input);
+  const found = searchSubjectOf(toolName, input);
+  const primary = found?.subject ?? null;
   // Where a search LANDED is the other half of the question; a file that was
   // simply opened is not — its own name is already the subject.
   const secondary = toolName === 'read' ? [] : subjectsFromOutput(outputText, 2);
+  if (files) {
+    if (found?.origin === 'path') files.add(found.subject.toLowerCase());
+    for (const f of secondary) files.add(f.toLowerCase());   // every one is a file name from a hit
+  }
 
   const seen = new Set<string>();
   const out: string[] = [];
