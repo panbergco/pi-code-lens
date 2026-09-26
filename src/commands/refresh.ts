@@ -17,7 +17,7 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -439,7 +439,19 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
     const pid = Number(readFileSync(LOCK, 'utf8').trim());
     let alive = false;
     try { process.kill(pid, 0); alive = true; } catch { /* gone */ }
-    if (alive) { console.log(`skipped: refresh ${pid} is still running`); return 0; }
+    if (alive) {
+      // A live holder can still be stuck: a refresh run inside a pi session held
+      // this lock for as long as its stalled semantic pass (up to 4 h), and every
+      // other refresh skipped silently behind it. Recorded like any other block.
+      let heldMs = 0;
+      try { heldMs = Date.now() - statSync(LOCK).mtimeMs; } catch { /* just released */ }
+      let who = 'a refresh';
+      try { who = /(^|\/)pi( |$)/.test(readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')) ? 'a refresh inside a pi session' : who; } catch { /* gone */ }
+      const why = `${who} (pid ${pid}) has held the refresh lock for ${ago(heldMs)}`;
+      recordBlocked(why);
+      console.log(`skipped: ${why}`);
+      return 0;
+    }
     console.log(`clearing stale lock from dead process ${pid || '?'}`);
   }
   mkdirSync(dirname(LOCK), { recursive: true });

@@ -66,6 +66,18 @@ try {
   assert.equal(passVerdict({ engine: 'semantic', ageMs: 5 * 60_000 }), 'wait', 'a young pass is waited for');
   assert.equal(passVerdict({ engine: 'semantic', ageMs: STALLED_MS + 1 }), 'stalled', 'an old semantic pass is stalled, not busy');
   assert.equal(passVerdict({ engine: 'graph', ageMs: STALLED_MS * 4 }), 'wait', 'a long graph pass is still real work on the same index');
+  // ── a live lock holder is a block too, and is recorded as one ─────────────
+  // A refresh inside a pi session held the lock for as long as its stalled
+  // semantic pass, and every other refresh skipped silently behind it.
+  process.env.LENS_TEST_NO_PASS = '1';
+  writeFileSync(join(home, '.code-lens', 'refresh.lock'), String(process.pid));   // alive: this process
+  const { refresh } = await import('../dist/commands/refresh.js');
+  const log = console.log; console.log = () => {};
+  try { await refresh({}); } finally { console.log = log; }
+  assert.match(refreshProblems(repo)[0] ?? '', /BLOCKED .*\(pid \d+\) has held the refresh lock/, 'a held lock is reported, with its holder');
+  rmSync(join(home, '.code-lens', 'refresh.lock'));
+  clearBlocked();
+
   console.log('ok — a failing or blocked refresh is recorded and said everywhere freshness is shown');
 } finally {
   rmSync(home, { recursive: true, force: true });
