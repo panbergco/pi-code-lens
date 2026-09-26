@@ -214,3 +214,22 @@ console.log('ok — automatic answers carry their caveats, and counts say "found
   assert.deepEqual([...files], ['lane-mint'], 'in a prompt too; a camelCase name stays a symbol');
 }
 console.log('ok — a name taken from a path is answered only from that file');
+
+
+// ── where a search actually ran (#5) ────────────────────────────────────────
+{
+  const { searchDir, repoRoot } = await import('../dist/core/augment.js');
+  const cwd = '/w/session';
+  const at = (command) => searchDir('bash', { command }, cwd);
+  assert.equal(at('grep -rn foo src'), null, 'no move, no answer from anywhere else');
+  assert.equal(at('cd ../other && grep -rn x src'), '/w/other', 'a leading cd moves the search');
+  assert.equal(at('cd ../other; cd lib && rg x'), '/w/other/lib', 'every leading cd, in order');
+  assert.equal(at('(cd /abs/repo && grep x .)'), '/abs/repo', 'inside a subshell too');
+  assert.equal(at('git -C ../pixel grep foo'), '/w/pixel', 'git -C names the repository');
+  assert.equal(at('cd - && grep x'), 'unknown', 'cd - cannot be known from here');
+  assert.equal(at('cd $REPO && grep x'), 'unknown', 'nor can a variable');
+  assert.equal(at('grep x src | cd nowhere'), null, 'only a LEADING cd counts');
+  assert.equal(searchDir('grep', { pattern: 'x', path: '/abs/repo/src' }, cwd), '/abs/repo/src', "the grep tool's path");
+  assert.equal(repoRoot('/proc/self/nonexistent/deep'), null, 'no repository above: null, never a throw');
+}
+console.log('ok — a search is placed in the directory it actually ran in');

@@ -37,10 +37,12 @@ writeFileSync(join(repo, '.code-lens', 'settings.json'), JSON.stringify({ timeou
 let answer = null;          // what the lens "finds"
 let calls = [];             // questions actually asked
 let delayMs = 0;            // how slow the engines are
-let stubNotes = [];         // what the pipeline says about its own freshness
+let stubNotes = [];
+let askedIn = [];            // the directory each question was asked about         // what the pipeline says about its own freshness
 globalThis.fetch = async (url, init) => {
   const body = JSON.parse(init?.body ?? '{}');
   calls.push(body.question);
+  askedIn.push(body.cwd);
   if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
   const spots = answer ? [answer] : [];
   return { ok: true, json: async () => ({ spots, ms: 12, notes: stubNotes, plan: { intent: 'breaks' } }) };
@@ -72,7 +74,7 @@ const result = (over = {}) => ({
 });
 const run = (over) => handlers.tool_result(result(over), ctx);
 const textOf = (r) => (r?.content ?? []).map((c) => c.text ?? '').join('');
-const reset = () => { calls = []; answer = structural; delayMs = 0; stubNotes = []; };
+const reset = () => { calls = []; askedIn = []; answer = structural; delayMs = 0; stubNotes = []; };
 
 // ── the search comes back carrying what the index knows ─────────────────────
 reset();
@@ -80,6 +82,34 @@ let out = await run();
 assert.ok(textOf(out).includes('what the index knows about "writeLane"'), 'the answer is appended');
 assert.ok(textOf(out).includes('3 callers'), 'and it carries the structure');
 assert.ok(textOf(out).startsWith(grepOutput), 'the search output itself is never replaced');
+
+// ── a search in another repository is answered from THAT repository (#5) ───
+{
+  const other = mkdtempSync(join(tmpdir(), 'lens-other-'));
+  mkdirSync(join(other, '.git'));
+  const unindexed = mkdtempSync(join(tmpdir(), 'lens-bare-'));
+  mkdirSync(join(unindexed, '.git'));
+  mkdirSync(join(other, '.gitnexus'));
+  writeFileSync(join(other, '.gitnexus', 'meta.json'), JSON.stringify({ lastCommit: 'b'.repeat(40), indexedAt: new Date().toISOString() }));
+
+  reset();
+  out = await run({ input: { command: `cd ${other} && grep -rn otherSymbol src` } });
+  assert.ok(askedIn.length && askedIn.every((d) => d === other), `every question goes to the repository that was searched (got ${askedIn})`);
+
+  reset();
+  out = await run({ input: { command: `cd ${unindexed} && grep -rn bareSymbol src` } });
+  assert.deepEqual(calls.filter(Boolean), [], 'another repository with no index gets silence, never the session\'s answer');
+  assert.equal(textOf(out).includes('[code-lens'), false, 'and nothing is appended');
+
+  reset();
+  out = await run({ input: { command: 'cd - && grep -rn whereverSymbol src' } });
+  assert.deepEqual(calls.filter(Boolean), [], 'a move that cannot be resolved is not guessed at');
+
+  reset();
+  out = await run({ input: { command: 'cd src && grep -rn localSymbol .' } });
+  assert.ok(askedIn.length && askedIn.every((d) => d === repo), `a subfolder of the session is still the session (got ${askedIn})`);
+  rmSync(other, { recursive: true, force: true }); rmSync(unindexed, { recursive: true, force: true });
+}
 
 // ── the index's own warning travels with the answer ────────────────────────
 // Read only to decide on silence before, so a stale answer looked like a fresh one.
@@ -248,7 +278,7 @@ rmSync(repo, { recursive: true, force: true });
 
   // The file is named for the symbol it holds, and the index places it there.
   answer = { ...structural, file: 'packages/core/src/writeLane.ts' };
-  const out = await edit('/repo/packages/core/src/writeLane.ts');
+  const out = await edit(`${repo}/packages/core/src/writeLane.ts`);
   assert.match(textOf(out), /you just changed "writeLane"; this depends on it/,
     'an edited symbol is met with who depends on it');
   assert.match(textOf(out), /3 callers/, 'and the dependents are real structure');
@@ -257,7 +287,7 @@ rmSync(repo, { recursive: true, force: true });
   // this fixture sets it to 0 so the memory expires instantly — so here the
   // second save speaks again, and that is the configured behaviour, not a leak.
   // At the shipped default (30 min) an edit loop stays quiet after the first.
-  assert.notEqual(await edit('/repo/packages/core/src/writeLane.ts'), undefined,
+  assert.notEqual(await edit(`${repo}/packages/core/src/writeLane.ts`), undefined,
     'with no repeat window, a later save is answered again');
 
   // #12: the edited FILE is the subject. A same-named symbol in another file is
@@ -265,12 +295,19 @@ rmSync(repo, { recursive: true, force: true });
   // variable called \`augment\` in extensions/index.ts, callers and all.
   reset();
   answer = { ...structural, symbol: 'augment', file: 'extensions/index.ts', line: 310 };
-  const wrong = await edit('/repo/src/core/augment.ts');
+  const wrong = await edit(`${repo}/src/core/augment.ts`);
   assert.ok(!/extensions\/index\.ts:310|index\.ts/.test(textOf(wrong)),
     `a same-named symbol elsewhere never answers for the edited file (got: ${textOf(wrong).slice(0, 160)})`);
 
-  assert.equal(await edit('/repo/docs/notes.md'), undefined, 'a non-code file has no blast radius');
-  assert.equal(await edit('/repo/packages/core/src/store.ts', { isError: true }), undefined,
+  assert.equal(await edit(`${repo}/docs/notes.md`), undefined, 'a non-code file has no blast radius');
+  const elsewhere = mkdtempSync(join(tmpdir(), 'lens-elsewhere-'));
+  mkdirSync(join(elsewhere, '.git'));
+  reset();
+  assert.equal(await edit(`${elsewhere}/src/writeLane.ts`), undefined,
+    "an edit in another, unindexed checkout is never answered from this session's index (#5)");
+  assert.deepEqual(calls.filter(Boolean), [], 'and asks it nothing');
+  rmSync(elsewhere, { recursive: true, force: true });
+  assert.equal(await edit(`${repo}/packages/core/src/store.ts`, { isError: true }), undefined,
     'a failed edit changed nothing, so it breaks nothing');
 }
 
@@ -358,7 +395,7 @@ console.log('ok — a session start or reload no longer rebuilds a repository on
   reset(); answer = { ...structural, symbol: 'packedSymbol', file: 'src/packed.ts', line: 7 };   // a spot not shown before
   await handlers.before_agent_start({ prompt: 'what calls packedSymbol now?', systemPrompt: 'x' }, ctx);
   reset(); answer = { ...structural, file: 'src/editedThing.ts' };
-  await handlers.tool_result({ toolName: 'edit', input: { path: '/r/src/editedThing.ts' },
+  await handlers.tool_result({ toolName: 'edit', input: { path: `${repo}/src/editedThing.ts` },
     content: [{ type: 'text', text: 'ok' }], isError: false }, ctx);
   const logged = readDeliveries(repo, since, repo);        // HOME is the fixture repo in this suite
   const has = (channel, outcome, reason) => logged.some((d) =>

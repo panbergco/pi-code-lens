@@ -13,7 +13,9 @@
  * The extraction rules are adapted from pi-gitnexus 0.6.4 (MIT), which solved
  * the same problem for a single engine.
  */
-import { basename, extname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 
 /** Reading a source file is a question about that file; reading a log is not. */
 const CODE_EXTENSIONS = new Set([
@@ -81,6 +83,52 @@ export function literalFromRegex(pattern: string): string | null {
   const runs = pattern.split(/[^A-Za-z0-9_$]+/).filter((s) => s.length >= 3);
   if (!runs.length) return null;
   return runs.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
+/**
+ * The directory a search actually ran in, when it is not the session's.
+ *
+ * `cd ../other && grep -rn x src` searches another checkout, and answering it
+ * from the session's index hands the agent confident structure about the wrong
+ * codebase (#5). Read from the command: every leading `cd`/`pushd`, and a
+ * `git -C <dir>`; for the grep/find tools, a path argument. Null when nothing
+ * moved the search. A `cd` whose target cannot be known (`cd -`, `cd $X`) is
+ * reported as `unknown`, so the caller stays silent rather than guess.
+ */
+export function searchDir(toolName: string, input: Record<string, unknown>, cwd: string): string | null | 'unknown' {
+  const expand = (d: string, base = cwd): string | 'unknown' => {
+    if (d === '-' || /[$`*?]/.test(d)) return 'unknown';
+    const home = d === '~' || d.startsWith('~/') ? homedir() + d.slice(1) : d;
+    return resolve(base, home);
+  };
+  if (toolName === 'grep' || toolName === 'find') {
+    const p = typeof input.path === 'string' ? input.path : '';
+    return p ? expand(p) : null;
+  }
+  if (toolName !== 'bash' || typeof input.command !== 'string') return null;
+  const tokens = tokenizeCommand(input.command.replace(/^\s*\(/, ''));
+  let dir: string | null | 'unknown' = null;
+  let at = 0;
+  // Leading directory changes, each joined to the next step by ; or &&.
+  while (tokens[at] === 'cd' || tokens[at] === 'pushd') {
+    const target = tokens[at + 1];
+    const bare = !target || target === ';' || target === '|';
+    if (dir !== 'unknown') dir = bare ? homedir() : expand(target!, dir ?? cwd);
+    at += bare ? 1 : 2;
+    if (tokens[at] !== ';') break;
+    at += 1;
+  }
+  const c = tokens.indexOf('-C', at);
+  if (c > 0 && tokens[c - 1] === 'git' && tokens[c + 1]) dir = expand(tokens[c + 1]!);
+  return dir;
+}
+
+/** The repository a directory belongs to: nearest ancestor holding `.git`. */
+export function repoRoot(dir: string): string | null {
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    if (existsSync(`${d}/.git`)) return d;
+    if (dirname(d) === d) return null;
+  }
 }
 
 /**

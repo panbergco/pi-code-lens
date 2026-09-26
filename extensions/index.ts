@@ -31,7 +31,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_MAX_BYTES,
@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { ask, createEngines, type Engines } from "../src/core/ask.js";
-import { answersFile, foundNothing, freshnessCaveat, promptSubjects, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
+import { answersFile, foundNothing, freshnessCaveat, promptSubjects, repoRoot, searchDir, subjectsForSearch, symbolFromPath } from "../src/core/augment.js";
 import { crux } from "../src/core/crux.js";
 import { recordDelivery } from "../src/core/deliveries.js";
 import { savingsLine } from "../src/core/savings.js";
@@ -769,9 +769,16 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // Same rule as a search subject: a code file, and a name worth asking about.
     const symbol = symbolFromPath(path);
     if (!symbol) return;
-    if (freshness(ctx.cwd).state === "unindexed") return;
+    // The edited file's own repository, like a search's (#5): an edit to another
+    // checkout is answered from that checkout's index, or not at all.
+    const abs = resolve(ctx.cwd, path);
+    const inside = abs.startsWith(`${ctx.cwd}/`);
+    const there = inside ? ctx.cwd : repoRoot(abs);
+    if (!there) return;
+    const cwd = there === (repoRoot(ctx.cwd) ?? ctx.cwd) ? ctx.cwd : there;
+    if (freshness(cwd).state === "unindexed") return;
     if (recall().answered.has(symbol.toLowerCase())) {
-      recordDelivery(ctx.cwd, { channel: "edit", outcome: "silent", reason: "answered minutes ago", subjects: [symbol] });
+      recordDelivery(cwd, { channel: "edit", outcome: "silent", reason: "answered minutes ago", subjects: [symbol] });
       return;
     }
     const started = Date.now();
@@ -781,11 +788,11 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // is why this channel delivered zero while the graph held 7 importers for
     // dataset.ts and 8 for proof.ts. Ask about the symbol when the name is one,
     // and about the file otherwise.
-    let answer = await answerFor(symbol, ctx.cwd, settings.timeoutMs, settings.budgetTokens, true);
+    let answer = await answerFor(symbol, cwd, settings.timeoutMs, settings.budgetTokens, true);
     if (!answer) {
-      const importers = await graphEngine().importersOf(symbol, await repoOf(ctx.cwd), 6);
+      const importers = await graphEngine().importersOf(symbol, await repoOf(cwd), 6);
       if (!importers.length) {   // nothing depends on it: nothing to warn about
-        recordDelivery(ctx.cwd, { channel: "edit", outcome: "silent", reason: "no dependents found", subjects: [symbol], ms: Date.now() - started });
+        recordDelivery(cwd, { channel: "edit", outcome: "silent", reason: "no dependents found", subjects: [symbol], ms: Date.now() - started });
         return;
       }
       answer = {
@@ -798,7 +805,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
     }
     augmentHits++;
     trace("blast radius", symbol);
-    recordDelivery(ctx.cwd, { channel: "edit", outcome: "delivered", reason: "dependents", subjects: [symbol],
+    recordDelivery(cwd, { channel: "edit", outcome: "delivered", reason: "dependents", subjects: [symbol],
                               ms: Date.now() - started, bytes: answer.body.length });
     return {
       content: [...(event.content ?? []), {
@@ -822,9 +829,24 @@ export default function piCodeLens(pi: ExtensionAPI) {
   async function enrichSearch(event: any, ctx: ExtensionContext): Promise<{ content: unknown[] } | undefined> {
     if (!settings.augment) return;
     if (!Array.isArray(event.content)) return;
-    if (freshness(ctx.cwd).state === "unindexed") return;  // nothing to answer with
-
     const input = (event.input ?? {}) as Record<string, unknown>;
+
+    // Answer from the repository that was SEARCHED (#5). `cd ../other && grep`
+    // answered from the session's index described the wrong codebase with full
+    // confidence. Another repository is answered from its own index, or not at
+    // all; a move that cannot be resolved (`cd -`, `cd $X`), or into no
+    // repository, is met with silence rather than a guess.
+    const moved = searchDir(event.toolName, input, ctx.cwd);
+    let cwd = ctx.cwd;
+    if (moved === "unknown") return;
+    const inside = moved && moved !== "unknown" && (moved === ctx.cwd || moved.startsWith(`${ctx.cwd}/`));
+    if (moved && !inside) {
+      const there = repoRoot(moved);
+      if (!there) return;
+      if (there !== (repoRoot(ctx.cwd) ?? ctx.cwd)) cwd = there;
+    }
+    if (freshness(cwd).state === "unindexed") return;  // nothing to answer with
+
     const text = event.content.map((c: { text?: string }) => c.text ?? "").join("\n");
     // A search that found NOTHING is the moment this index is worth most: the
     // agent has learned nothing and is about to search again, usually with a
@@ -842,7 +864,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       const raw = subjectsForSearch(event.toolName, input, text, { answered: new Set(), unanswerable: new Set() }, settings.maxSubjects);
       if (raw.length) {
         const mem = recall();
-        recordDelivery(ctx.cwd, { channel: empty ? "empty-search" : "search", outcome: "silent",
+        recordDelivery(cwd, { channel: empty ? "empty-search" : "search", outcome: "silent",
           reason: mem.answered.has(raw[0]!.toLowerCase()) ? "answered minutes ago" : "recent dead end", subjects: raw });
       }
       return;
@@ -870,14 +892,14 @@ export default function piCodeLens(pi: ExtensionAPI) {
     for (const subject of subjects) {
       if (Date.now() >= deadline) { trace("time spent"); break; }
       if (left < 60) { trace("budget spent"); break; }   // too little room to say anything useful
-      const answer = await answerFor(subject, ctx.cwd, deadline - Date.now(), left, fileSubjects.has(subject.toLowerCase()));
+      const answer = await answerFor(subject, cwd, deadline - Date.now(), left, fileSubjects.has(subject.toLowerCase()));
       if (!answer) continue;
       found.push(answer);
       left -= estimateTokens(answer.body);
     }
     if (!found.length) {
       trace("nothing structural to add");
-      recordDelivery(ctx.cwd, { channel, outcome: "silent", reason: lastSilence || "no structure",
+      recordDelivery(cwd, { channel, outcome: "silent", reason: lastSilence || "no structure",
                                 subjects, ms: Date.now() - started });
       return;
     }
@@ -895,8 +917,8 @@ export default function piCodeLens(pi: ExtensionAPI) {
     // What this saved, measured against opening those files whole. It makes the
     // value visible at the moment of delivery instead of reconstructing it from
     // transcripts days later — which is how adoption stayed invisible for weeks.
-    const saved = savingsLine(body, found.flatMap((f) => f.files ?? []), ctx.cwd);
-    recordDelivery(ctx.cwd, { channel, outcome: "delivered", reason: "answered", subjects: found.map((x) => x.subject),
+    const saved = savingsLine(body, found.flatMap((f) => f.files ?? []), cwd);
+    recordDelivery(cwd, { channel, outcome: "delivered", reason: "answered", subjects: found.map((x) => x.subject),
                               ms: Date.now() - started, bytes: body.length + (saved?.length ?? 0) });
     return {
       content: [...event.content, {
