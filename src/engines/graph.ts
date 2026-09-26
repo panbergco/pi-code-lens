@@ -14,6 +14,16 @@ interface RpcResult { result?: any; error?: { message?: string } }
 export class GraphEngine implements Engine {
   readonly id = 'graph' as const;
   private session: string | null = null;
+  /**
+   * A fresh JSON-RPC id per request. The server routes each reply to the
+   * request carrying its id, per session, and every request used to go out as
+   * `id: 2`: two in flight at once collided, so one question received the
+   * other's answer and the other received nothing. Measured live, 5 of 5
+   * overlapping pairs wrong with a shared id, 0 of 5 with distinct ones. The hot
+   * server shares this session across every agent, so it crossed their answers.
+   * Starts above 1, which initialize uses.
+   */
+  private nextId = 1;
   /** Every engine that has opened a session in this process, so a short-lived
    *  command can hand them all back on the way out without each call site
    *  having to remember. */
@@ -96,7 +106,7 @@ export class GraphEngine implements Engine {
     const ctl = AbortSignal.timeout(timeoutMs);
     const res = await fetch(this.url, {
       method: 'POST', headers: this.headers(), signal: ctl,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++this.nextId, method, params }),
     });
     const doc = GraphEngine.parse(await res.text());
     // gitnexus restarts, and its sessions expire. A long-lived `lens serve` then
