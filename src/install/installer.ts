@@ -11,6 +11,7 @@
  * engine's daemon idles out by default, which is precisely the failure this
  * installer's keep-warm timer prevents.
  */
+import { ensureStallRecorder } from '../core/stall-recorder.js';
 import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -190,6 +191,10 @@ exec "$root/bin/ccc" "$@"
     // mcp<2 is load-bearing: 2.x removed a module while leaving the CLI apparently healthy.
     sh(`uv tool install --force --upgrade 'cocoindex-code[full]' --with 'mcp<2'`, dry);
   }
+
+  // Lets a stalled semantic pass record where it is stuck before the watchdog
+  // restarts it (see src/core/stall-recorder.ts).
+  if (!dry) for (const sp of ensureStallRecorder()) console.log(`  ✓ stall recorder installed in ${sp}`);
 
   if (opts.npu) {
     if (!existsSync('/dev/accel/accel0')) {

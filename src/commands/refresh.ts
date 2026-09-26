@@ -23,6 +23,7 @@ import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { GraphEngine } from '../engines/graph.js';
 import { cccEnv } from '../engines/semantic.js';
+import { captureStall, ensureStallRecorder } from '../core/stall-recorder.js';
 import { ago, clearBlocked, failureReason, noteFailure, recordBlocked, type Failing } from '../core/refresh-health.js';
 
 const run = promisify(execFile);
@@ -274,10 +275,14 @@ export async function cccIndexWatched(dir: string, stallMs = CCC_STALL_MS, pollM
     return await job;
   } catch (e) {
     if (!stalled) throw e;
+    // Evidence FIRST: the restart is the cure, and it erases every trace of
+    // the cause (two stalls on 26 Sep left nothing to diagnose).
+    const evidence = await captureStall();
     let restarted = 'ccc daemon restarted';
     try { await run('ccc', ['daemon', 'restart'], { cwd: dir, timeout: 120_000, env: cccEnv() }); }
     catch { restarted = 'ccc daemon restart FAILED'; }
-    throw new Error(`stalled: no progress for ${ago(stallMs)} (${stalled}) — pass stopped; ${restarted}`);
+    throw new Error(`stalled: no progress for ${ago(stallMs)} (${stalled}) — pass stopped; ${restarted}; ` +
+                    (evidence ? `evidence: ${evidence}` : 'no stall evidence captured'));
   } finally {
     clearInterval(timer);
   }
@@ -458,6 +463,8 @@ export interface RefreshOpts {
 export async function refresh(o: RefreshOpts = {}): Promise<number> {
   const applied = loadEngineEnv();
   if (applied.length) console.log(`engine config: ${applied.length} settings from ${ENGINE_ENV}`);
+  // Upgrading ccc replaces its environment and with it the stall recorder.
+  if (!o.dryRun) for (const sp of ensureStallRecorder()) console.log(`stall recorder installed in ${sp}`);
   const busy = runningPass();
   const verdict = passVerdict(busy);
   if (busy && verdict === 'wait') {
