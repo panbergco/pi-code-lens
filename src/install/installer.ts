@@ -102,7 +102,9 @@ function embedToken(create: boolean, dry: boolean): string {
   }
   const t = given ?? randomBytes(24).toString('hex');
   // Both variable names: the server reads EMBED_TOKEN, GitNexus reads its own.
-  write(EMBED_ENV, `EMBED_TOKEN=${t}\nGITNEXUS_EMBEDDING_API_KEY=${t}\n`, dry);
+  // A dry run prints what it would write; a secret has no business in that output.
+  const shown = dry ? '<generated>' : t;
+  write(EMBED_ENV, `EMBED_TOKEN=${shown}\nGITNEXUS_EMBEDDING_API_KEY=${shown}\n`, dry);
   if (!dry) chmodSync(EMBED_ENV, 0o600);
   return t;
 }
@@ -286,7 +288,7 @@ export function configureGpu(opts: InstallOpts, dry: boolean,
   if (opts.remoteEmbeddings) {
     const path = join(homedir(), '.cocoindex_code/global_settings.yml');
     const old = existsSync(path) ? readFileSync(path, 'utf8') : '';
-    write(path, replaceYamlSection(old, 'embedding', remoteSemanticBlock(opts.remoteEmbeddings, embedToken(false, dry))), dry);
+    write(path, replaceYamlSection(old, 'embedding', remoteSemanticBlock(opts.remoteEmbeddings, dry ? '<from embed.env>' : embedToken(false, dry))), dry);
     if (!dry) chmodSync(path, 0o600); // it now carries the token
     if (!dry && have('ccc')) sh('ccc daemon stop >/dev/null 2>&1 || true', false);
     console.log(`  semantic: ${SEMANTIC_MODEL} via ${opts.remoteEmbeddings}`);
@@ -375,7 +377,9 @@ After=network.target
 Type=simple
 ${env}Environment=PATH=${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
 ExecStart=${graphBin} mcp --http --port ${GRAPH_PORT} --host 127.0.0.1
-ExecStartPost=${homedir()}/.local/bin/gitnexus-warm
+# '-': the warm-up script is optional; the installer does not ship it, and a
+# missing one must not fail the engine it only pre-warms.
+ExecStartPost=-${homedir()}/.local/bin/gitnexus-warm
 Restart=always
 RestartSec=3
 
