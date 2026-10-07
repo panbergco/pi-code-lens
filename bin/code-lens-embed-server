@@ -10,7 +10,8 @@ crosses the network; the indexes stay on the client.
 Run with a Python that has sentence-transformers (ccc's own `[full]` venv):
   EMBED_TOKEN=… EMBED_DEVICE=cuda:1 python code-lens-embed-server
 Env: EMBED_TOKEN (required), EMBED_HOST (0.0.0.0), EMBED_PORT (8767),
-     EMBED_DEVICE (cpu), EMBED_MODELS (comma list; first is the default).
+     EMBED_DEVICE (cpu), EMBED_MODELS (comma list; first is the default),
+     EMBED_BATCH (16; halved automatically when the card runs out of memory).
 """
 import hmac, json, os, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ MODELS = [m.strip() for m in os.environ.get(
     'EMBED_MODELS', 'Shuu12121/CodeSearch-ModernBERT-Crow-Plus').split(',') if m.strip()]
 DEVICE = os.environ.get('EMBED_DEVICE', 'cpu')
 MAX_INPUTS = 2048
+BATCH = int(os.environ.get('EMBED_BATCH', 16))
 _loaded, _gpu = {}, threading.Lock()  # one model call at a time: the card is shared
 
 
@@ -32,11 +34,24 @@ def model(name):
 
 def embed(name, texts):
     with _gpu:
-        m = model(name)
-        # normalize=True matches ccc's local SentenceTransformerEmbedder, so a
-        # remote index and a local one hold the same vectors.
-        return m.encode(texts, batch_size=64, normalize_embeddings=True,
-                        convert_to_numpy=True).tolist()
+        m, batch = model(name), BATCH
+        while True:
+            try:
+                # normalize=True matches ccc's local SentenceTransformerEmbedder,
+                # so a remote index and a local one hold the same vectors.
+                return m.encode(texts, batch_size=batch, normalize_embeddings=True,
+                                convert_to_numpy=True).tolist()
+            except Exception as e:
+                # The card is shared (measured: a 6 GB card with ccc's own daemon
+                # on it ran out at batch 64). Long chunks need smaller batches;
+                # only a single text that still does not fit is an error.
+                if 'out of memory' not in str(e).lower() or batch == 1:
+                    raise
+                batch //= 2
+            finally:
+                if DEVICE.startswith('cuda'):
+                    import torch
+                    torch.cuda.empty_cache()
 
 
 class Handler(BaseHTTPRequestHandler):
