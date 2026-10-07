@@ -7,7 +7,7 @@ import { refreshProblems } from './refresh-health.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { GraphEngine, locKey } from '../engines/graph.js';
+import { GraphEngine, locKey, repoForDir } from '../engines/graph.js';
 import { SemanticEngine } from '../engines/semantic.js';
 import type { Candidate, Neighbourhood } from '../engines/types.js';
 import { route, type Plan } from './router.js';
@@ -57,13 +57,9 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
    * inventing a name.
    */
   const gh = await graph.healthCached();
-  const guess = basename(cwd);
-  const repo = input.repo
-    ?? (gh.repos.some((r) => r === guess || r.endsWith(`/${guess}`)) ? guess : undefined);
-  if (!input.repo && !repo && gh.repos.length > 1) {
-    notes.push(`ambiguous: "${guess}" is not an indexed repo and ${gh.repos.length} are ` +
-               `registered (${gh.repos.join(', ')}) — pass --repo`);
-  }
+  const repo = input.repo ?? repoForDir(cwd);
+  if (!repo) notes.push(`${basename(cwd)} is not inside an indexed repository — answering from nothing, ` +
+                        'never from another project');
 
   if (plan.seed) {
     try {
@@ -94,8 +90,8 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
   let hoods = new Map<string, Neighbourhood>();
 
   if (plan.expand && expandable.length) {
-    const target = repo ?? guess;
-    const covered = gh.up && gh.repos.some((r) => r === target || r.endsWith(`/${target}`));
+    const target = repo ?? basename(cwd);
+    const covered = Boolean(repo) && gh.up && gh.repos.some((r) => r === target || r.endsWith(`/${target}`));
     if (!covered) {
       // "No index" and "index being rewritten right now" look identical from
       // here, and telling a reader to run the build that IS running sends them

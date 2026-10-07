@@ -15,6 +15,9 @@ const home = mkdtempSync(join(tmpdir(), 'lens-kpi-home-'));
 const repo = join(home, 'Code', 'fixture');
 mkdirSync(repo, { recursive: true });
 process.env.HOME = home;
+// The fixture is a registered repository, found by path like a real one.
+mkdirSync(join(home, '.gitnexus'), { recursive: true });
+writeFileSync(join(home, '.gitnexus', 'registry.json'), JSON.stringify([{ name: 'fixture', path: repo }]));
 
 // ── the graph engine, stubbed at the network edge ───────────────────────────
 const KNOWN = ['claimSlice', 'writeLane'];          // symbols with callers

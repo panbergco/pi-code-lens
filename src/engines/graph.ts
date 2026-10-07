@@ -5,7 +5,32 @@
  * machine, a cold process answers in ~2,550 ms and the warm server in ~190 ms.
  * Spawning per call would throw away the entire reason the service exists.
  */
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import type { Candidate, Engine, Health, Neighbourhood, Query } from './types.js';
+
+/**
+ * The indexed repository a directory belongs to, as the engine's registry names
+ * it: the nearest ancestor whose path is registered. Matched by PATH, never by
+ * folder name — the name guess answered a question asked in an unindexed
+ * project with another project's code, and turned every subfolder into
+ * "no repo". `undefined` means: not inside any indexed repository.
+ */
+export function repoForDir(dir: string,
+  registry = process.env.GITNEXUS_REGISTRY ?? join(homedir(), '.gitnexus/registry.json')): string | undefined {
+  let reg: { name?: string; path?: string }[];
+  try { reg = JSON.parse(readFileSync(registry, 'utf8')); } catch { return undefined; }
+  if (!Array.isArray(reg)) return undefined;
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    const hit = reg.find((r) => r.path && resolve(r.path) === d);
+    if (hit?.name) return hit.name;
+    if (d === dirname(d)) return undefined;
+  }
+}
+
+/** Tools that are about the engine, not about one repository's code. */
+const REPO_FREE_TOOLS = new Set(['list_repos']);
 
 const DEFAULT_URL = process.env.LENS_GRAPH_URL ?? 'http://127.0.0.1:3737/mcp';
 
@@ -102,6 +127,13 @@ export class GraphEngine implements Engine {
 
   private async rpc(method: string, params: unknown, timeoutMs = 120_000,
                     retry = true): Promise<any> {
+    // With one repository indexed, the engine answers an unnamed call from THAT
+    // repository — whatever project the question came from. Refuse instead.
+    const call = params as { name?: string; arguments?: Record<string, unknown> };
+    if (method === 'tools/call' && !REPO_FREE_TOOLS.has(call?.name ?? '') && !call?.arguments?.repo) {
+      throw new Error('not inside an indexed repository — the graph engine is not asked, so ' +
+                      'no other project\'s code can answer (run `gitnexus analyze` here, or pass --repo)');
+    }
     await this.connect();
     const ctl = AbortSignal.timeout(timeoutMs);
     const res = await fetch(this.url, {
@@ -172,13 +204,8 @@ export class GraphEngine implements Engine {
    */
   async repoArg(cwd: string, explicit?: string): Promise<Record<string, string>> {
     if (explicit) return { repo: explicit };
-    const guess = cwd.split('/').filter(Boolean).pop() ?? '';
-    if (!guess) return {};
-    try {
-      const gh = await this.healthCached();
-      if (gh.repos.some((r) => r === guess || r.endsWith(`/${guess}`))) return { repo: guess };
-    } catch { /* engine down — let the call fail with its own message */ }
-    return {};
+    const repo = repoForDir(cwd);
+    return repo ? { repo } : {};
   }
 
   async healthCached(maxAgeMs = 60_000): Promise<Health> {

@@ -26,6 +26,7 @@ import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { passVerdict, runningPass } from '../commands/refresh.js';
+import { repoForDir } from '../engines/graph.js';
 
 /**
  * Files whose bytes moved since the index was written — the drift a commit count
@@ -102,7 +103,7 @@ export function healIfStale(
     // every registered repository, so one stale index made the machine re-check
     // all fifteen — launching the engine for each of them — to heal one.
     const child = (hooks.spawnFn ?? spawn)(
-      process.execPath, [cli, 'refresh', '--graph-only', '--repo', basename(cwd)],
+      process.execPath, [cli, 'refresh', '--graph-only', '--repo', repoForDir(cwd) ?? basename(cwd)],
       { cwd, detached: true, stdio: 'ignore' },
     );
     child.on?.('exit', () => { inFlight--; });

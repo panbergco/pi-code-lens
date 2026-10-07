@@ -42,7 +42,7 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}/mcp`;
 
 const e = new GraphEngine(url);
-const ask = (name) => e.passthrough(name, {}).then((r) => r?.asked ?? JSON.stringify(r),
+const ask = (name) => e.passthrough(name, { repo: "r" }).then((r) => r?.asked ?? JSON.stringify(r),
   (err) => `failed: ${String(err?.message ?? err).slice(0, 40)}`);
 const [a, b] = await Promise.all([
   Promise.race([ask('first'), new Promise((r) => setTimeout(() => r('NO REPLY'), 2_000))]),
