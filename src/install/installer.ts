@@ -13,7 +13,8 @@
  */
 import { ensureStallRecorder } from '../core/stall-recorder.js';
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -33,6 +34,15 @@ export interface InstallOpts {
   npu?: boolean;
   /** Minutes between keep-warm pings. Must be under the engine's idle timeout. */
   warmEvery?: number;
+  /** Serve this host's semantic model to other machines (token-protected, OpenAI-compatible). */
+  serveEmbeddings?: boolean;
+  embedPort?: number;
+  /**
+   * Embed through another host's served model instead of a local one: its base
+   * URL, e.g. `http://192.168.1.20:8767/v1`. No local model, no torch download;
+   * the indexes still live in each repo on THIS host.
+   */
+  remoteEmbeddings?: string;
   dryRun?: boolean;
 }
 
@@ -76,6 +86,39 @@ export function calendarFor(minutes: number): string {
 
 const UNIT_DIR = join(homedir(), '.config/systemd/user');
 const GRAPH_PORT = Number(process.env.LENS_GRAPH_PORT ?? 3737);
+/** One shared secret, the same file on the serving host and every client. */
+const EMBED_ENV = join(homedir(), '.config/code-lens/embed.env');
+const SEMANTIC_DIMS = 768;
+
+/** The token in EMBED_ENV; created on the serving host, copied to clients. */
+function embedToken(create: boolean, dry: boolean): string {
+  if (existsSync(EMBED_ENV)) {
+    const t = /^EMBED_TOKEN=(\S+)$/m.exec(readFileSync(EMBED_ENV, 'utf8'))?.[1];
+    if (t) return t;
+  }
+  const given = process.env.LENS_EMBED_TOKEN;
+  if (!create && !given) {
+    throw new Error(`no embedding token: copy ${EMBED_ENV} from the serving host, or set LENS_EMBED_TOKEN`);
+  }
+  const t = given ?? randomBytes(24).toString('hex');
+  // Both variable names: the server reads EMBED_TOKEN, GitNexus reads its own.
+  write(EMBED_ENV, `EMBED_TOKEN=${t}\nGITNEXUS_EMBEDDING_API_KEY=${t}\n`, dry);
+  if (!dry) chmodSync(EMBED_ENV, 0o600);
+  return t;
+}
+
+/** ccc's embedding block for a remote model: LiteLLM's OpenAI route to our server. */
+export function remoteSemanticBlock(url: string, token: string): string {
+  return `embedding:
+  provider: litellm
+  model: openai/${SEMANTIC_MODEL}
+  # Pacing exists for rate-limited clouds; our own server has no limit.
+  min_interval_ms: 0
+  indexing_params:
+    api_base: ${url}
+    api_key: ${token}
+  query_params: {}`;
+}
 
 export function gpuAvailable(): { present: boolean; devices: string[] } {
   try {
@@ -148,7 +191,13 @@ export function installEngines(opts: InstallOpts, dry: boolean,
   }
   if (!have('uv')) throw new Error('uv is required to install cocoindex-code (ccc)');
 
-  if (accelerator.kind === 'amd') {
+  if (opts.remoteEmbeddings) {
+    // Base package only: LiteLLM is a core dependency; [full] would pull torch
+    // and CUDA (gigabytes) for a model this host never runs.
+    console.log('  installing semantic engine without a local model (remote embeddings)…');
+    sh(`uv tool install --force --upgrade cocoindex-code --with 'mcp<2'`, dry);
+    sh(`ln -sfn "${homedir()}/.local/share/uv/tools/cocoindex-code/bin/ccc" "${homedir()}/.local/bin/ccc"`, dry);
+  } else if (accelerator.kind === 'amd') {
     const root = join(homedir(), '.local/share/uv/tools/cocoindex-code-rocm');
     const profile = join(root, 'ROCM_PROFILE');
     const ready = existsSync(join(root, 'bin/ccc')) && existsSync(profile) &&
@@ -234,7 +283,15 @@ function configureSemantic(device: string | undefined, dry: boolean): void {
 export function configureGpu(opts: InstallOpts, dry: boolean,
                              accelerator: Accelerator = acceleratorAvailable()): boolean {
   console.log('\n[2/4] accelerator');
-  if (accelerator.kind === 'nvidia') {
+  if (opts.remoteEmbeddings) {
+    const path = join(homedir(), '.cocoindex_code/global_settings.yml');
+    const old = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    write(path, replaceYamlSection(old, 'embedding', remoteSemanticBlock(opts.remoteEmbeddings, embedToken(false, dry))), dry);
+    if (!dry) chmodSync(path, 0o600); // it now carries the token
+    if (!dry && have('ccc')) sh('ccc daemon stop >/dev/null 2>&1 || true', false);
+    console.log(`  semantic: ${SEMANTIC_MODEL} via ${opts.remoteEmbeddings}`);
+    console.log('  graph:    CPU traversal; embeddings (if any) via the same remote model');
+  } else if (accelerator.kind === 'nvidia') {
     accelerator.devices.forEach((d) => console.log(`  found NVIDIA: ${d}`));
     const p = placement(opts, accelerator.devices.length);
     configureSemantic(`cuda:${p.semantic}`, dry);
@@ -273,7 +330,16 @@ Environment=GITNEXUS_EMBEDDING_HTTP_TIMEOUT_MS=30000
 Environment=GITNEXUS_EMBEDDING_MAX_ATTEMPTS=4
 Environment=GITNEXUS_EMBEDDING_RETRY_TIMEOUTS=1
 ` : '';
-  const env = npu ? npuEnv : accelerator.kind === 'nvidia'
+  // GitNexus's HTTP route moves its index AND query embeddings together, so a
+  // remote model is consistent on both sides (its local path is hardwired).
+  const remoteEnv = opts.remoteEmbeddings ? `Environment=CUDA_VISIBLE_DEVICES=
+Environment=GITNEXUS_EMBEDDING_DEVICE=cpu
+Environment=GITNEXUS_EMBEDDING_URL=${opts.remoteEmbeddings}
+Environment=GITNEXUS_EMBEDDING_MODEL=${SEMANTIC_MODEL}
+Environment=GITNEXUS_EMBEDDING_DIMS=${SEMANTIC_DIMS}
+EnvironmentFile=${EMBED_ENV}
+` : '';
+  const env = remoteEnv ? remoteEnv : npu ? npuEnv : accelerator.kind === 'nvidia'
     ? `Environment=CUDA_VISIBLE_DEVICES=${p.graph}\nEnvironment=GITNEXUS_EMBEDDING_DEVICE=cuda\n`
     : `Environment=CUDA_VISIBLE_DEVICES=\nEnvironment=GITNEXUS_EMBEDDING_DEVICE=cpu\n`;
   const npuUp = npu && npuEndpointActive();
@@ -355,7 +421,7 @@ Description=code-lens index refresh — incremental update of both engines
 [Service]
 Type=oneshot
 Environment=PATH=${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
-${npuEnv}ExecStart=/usr/bin/node ${repoRootForRefresh}bin/lens.mjs refresh
+${remoteEnv || npuEnv}ExecStart=/usr/bin/node ${repoRootForRefresh}bin/lens.mjs refresh
 `, dry);
 
   write(join(UNIT_DIR, 'code-lens-refresh.timer'), `[Unit]
@@ -390,7 +456,32 @@ RestartSec=3
 WantedBy=default.target
 `, dry);
 
+  if (opts.serveEmbeddings) {
+    embedToken(true, dry);
+    const venv = accelerator.kind === 'amd' ? 'cocoindex-code-rocm' : 'cocoindex-code';
+    const device = accelerator.kind === 'nvidia' ? `cuda:${p.semantic}` : accelerator.kind === 'amd' ? 'cuda' : 'cpu';
+    write(join(UNIT_DIR, 'code-lens-embed.service'), `[Unit]
+Description=code-lens remote embedding engine — serves the semantic model to other hosts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${EMBED_ENV}
+Environment=EMBED_DEVICE=${device}
+Environment=EMBED_PORT=${opts.embedPort ?? 8767}
+Environment=EMBED_MODELS=${SEMANTIC_MODEL}
+ExecStart=${homedir()}/.local/share/uv/tools/${venv}/bin/python ${repoRoot}bin/code-lens-embed-server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+`, dry);
+  }
+
   sh('systemctl --user daemon-reload', dry);
+  if (opts.serveEmbeddings) sh('systemctl --user enable code-lens-embed.service && systemctl --user restart code-lens-embed.service', dry);
   if (npu && !npuUp) sh('systemctl --user enable --now flm-embed.service', dry);
   sh('systemctl --user enable gitnexus-mcp.service code-lens.service code-lens-refresh.timer', dry);
   sh('systemctl --user restart gitnexus-mcp.service code-lens.service code-lens-refresh.timer', dry);

@@ -45,6 +45,8 @@ OPERATE
                                      could have been? (per checkout, never averaged)
   lens install [--hot-load] [--npu] [--gpu-graph N] [--gpu-semantic M] [--dry-run]
                                      installs GitNexus + ccc; auto-detects CPU/CUDA/ROCm
+      [--serve-embeddings [--embed-port P]]  also serve the semantic model to other hosts
+      [--remote-embeddings http://host:8767/v1]  embed through such a host; no local model
   lens serve                         hot server (engines stay warm)
   lens mcp                           stdio MCP server — one tool for agents
 
@@ -166,6 +168,9 @@ export async function main(argv: string[]): Promise<number> {
         gpuGraph: flags['gpu-graph'] !== undefined ? Number(flags['gpu-graph']) : undefined,
         gpuSemantic: flags['gpu-semantic'] !== undefined ? Number(flags['gpu-semantic']) : undefined,
         warmEvery: flags['warm-every'] !== undefined ? Number(flags['warm-every']) : undefined,
+        serveEmbeddings: Boolean(flags['serve-embeddings']),
+        embedPort: flags['embed-port'] !== undefined ? Number(flags['embed-port']) : undefined,
+        remoteEmbeddings: str(flags['remote-embeddings']),
         dryRun: Boolean(flags['dry-run']),
       });
     default:

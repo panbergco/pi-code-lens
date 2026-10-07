@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { placement, replaceYamlSection } from '../dist/install/installer.js';
+import { placement, remoteSemanticBlock, replaceYamlSection } from '../dist/install/installer.js';
 
 const original = `# keep me
 embedding:
@@ -43,4 +43,19 @@ console.log('ok — accelerator model config is replaced without deleting unrela
   assert.equal(cccEnv({ CUDA_VISIBLE_DEVICES: '0', PATH: '/bin' }).CUDA_VISIBLE_DEVICES, '0',
     'but a real device choice is somebody\'s decision, and is left alone');
   assert.equal(cccEnv({ PATH: '/bin' }).PATH, '/bin', 'and an unset mask changes nothing');
+}
+
+
+// ── a remote model replaces the local one, and nothing else ─────────────────
+{
+  const block = remoteSemanticBlock('http://10.0.0.5:8767/v1', 'tok');
+  const out = replaceYamlSection(original, 'embedding', block);
+  assert.match(out, /provider: litellm/);
+  assert.match(out, /model: openai\/Shuu12121\/CodeSearch-ModernBERT-Crow-Plus/,
+    'the SAME model, so a remote index matches a local one');
+  assert.match(out, /api_base: http:\/\/10\.0\.0\.5:8767\/v1/);
+  assert.match(out, /api_key: tok/);
+  assert.doesNotMatch(out, /sentence-transformers|device:/, 'no local device left behind');
+  assert.match(out, /envs:\n  TOKENIZERS_PARALLELISM: "false"/);
+  console.log('ok — remote embeddings point ccc at the served model without touching other settings');
 }

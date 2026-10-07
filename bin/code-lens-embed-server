@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""code-lens remote embedding engine.
+
+Serves the semantic model to OTHER machines, so a host without a usable GPU can
+index and search through one that has one. OpenAI-compatible `/v1/embeddings`,
+which is the request shape both engines already speak: ccc through its LiteLLM
+provider, GitNexus through GITNEXUS_EMBEDDING_URL. Only text to be embedded
+crosses the network; the indexes stay on the client.
+
+Run with a Python that has sentence-transformers (ccc's own `[full]` venv):
+  EMBED_TOKEN=… EMBED_DEVICE=cuda:1 python code-lens-embed-server
+Env: EMBED_TOKEN (required), EMBED_HOST (0.0.0.0), EMBED_PORT (8767),
+     EMBED_DEVICE (cpu), EMBED_MODELS (comma list; first is the default).
+"""
+import hmac, json, os, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+TOKEN = os.environ.get('EMBED_TOKEN', '')
+MODELS = [m.strip() for m in os.environ.get(
+    'EMBED_MODELS', 'Shuu12121/CodeSearch-ModernBERT-Crow-Plus').split(',') if m.strip()]
+DEVICE = os.environ.get('EMBED_DEVICE', 'cpu')
+MAX_INPUTS = 2048
+_loaded, _gpu = {}, threading.Lock()  # one model call at a time: the card is shared
+
+
+def model(name):
+    if name not in _loaded:
+        from sentence_transformers import SentenceTransformer
+        _loaded[name] = SentenceTransformer(name, device=DEVICE, trust_remote_code=True)
+    return _loaded[name]
+
+
+def embed(name, texts):
+    with _gpu:
+        m = model(name)
+        # normalize=True matches ccc's local SentenceTransformerEmbedder, so a
+        # remote index and a local one hold the same vectors.
+        return m.encode(texts, batch_size=64, normalize_embeddings=True,
+                        convert_to_numpy=True).tolist()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def reply(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def authorised(self):
+        got = self.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+        return bool(TOKEN) and hmac.compare_digest(got, TOKEN)
+
+    def do_GET(self):
+        if self.path == '/health':
+            return self.reply(200, {'ok': True, 'device': DEVICE, 'loaded': list(_loaded)})
+        if not self.authorised():
+            return self.reply(401, {'error': {'message': 'bad or missing token'}})
+        if self.path.rstrip('/') == '/v1/models':
+            return self.reply(200, {'object': 'list', 'data': [{'id': m, 'object': 'model'} for m in MODELS]})
+        self.reply(404, {'error': {'message': 'not found'}})
+
+    def do_POST(self):
+        if not self.authorised():
+            return self.reply(401, {'error': {'message': 'bad or missing token'}})
+        if self.path.rstrip('/') != '/v1/embeddings':
+            return self.reply(404, {'error': {'message': 'not found'}})
+        try:
+            req = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+            name = req.get('model') or MODELS[0]
+            name = name.removeprefix('openai/')
+            if name not in MODELS:
+                return self.reply(400, {'error': {'message': f'model not served: {name}; serving {MODELS}'}})
+            texts = req.get('input')
+            texts = [texts] if isinstance(texts, str) else texts
+            if not isinstance(texts, list) or not texts or len(texts) > MAX_INPUTS or \
+                    not all(isinstance(t, str) for t in texts):
+                return self.reply(400, {'error': {'message': f'input must be 1..{MAX_INPUTS} strings'}})
+            vecs = embed(name, texts)
+            want = req.get('dimensions')
+            if want is not None and want != len(vecs[0]):
+                return self.reply(400, {'error': {'message': f'{name} produces {len(vecs[0])} dimensions, not {want}'}})
+        except Exception as e:  # report, never kill the server
+            return self.reply(500, {'error': {'message': str(e)[:500]}})
+        self.reply(200, {'object': 'list', 'model': name,
+                         'data': [{'object': 'embedding', 'index': i, 'embedding': v} for i, v in enumerate(vecs)],
+                         'usage': {'prompt_tokens': 0, 'total_tokens': 0}})
+
+    def log_message(self, fmt, *args):
+        pass  # per-request logs would carry nothing useful and fill the journal
+
+
+if __name__ == '__main__':
+    if not TOKEN:
+        sys.exit('EMBED_TOKEN is required: this listens on the network')
+    model(MODELS[0])  # load at start, so the first question does not pay for it
+    host, port = os.environ.get('EMBED_HOST', '0.0.0.0'), int(os.environ.get('EMBED_PORT', 8767))
+    print(f'code-lens embed server on {host}:{port}, {MODELS} on {DEVICE}', flush=True)
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
