@@ -110,16 +110,32 @@ function embedToken(create: boolean, dry: boolean): string {
 }
 
 /** ccc's embedding block for a remote model: LiteLLM's OpenAI route to our server. */
-export function remoteSemanticBlock(url: string, token: string): string {
+export function remoteSemanticBlock(): string {
   return `embedding:
   provider: litellm
   model: openai/${SEMANTIC_MODEL}
   # Pacing exists for rate-limited clouds; our own server has no limit.
   min_interval_ms: 0
-  indexing_params:
-    api_base: ${url}
-    api_key: ${token}
+  indexing_params: {}
   query_params: {}`;
+}
+
+/**
+ * Set keys in ccc's `envs:` section, keeping every other entry. ccc only
+ * accepts `input_type` in the embedder params, so the endpoint and its token
+ * travel the way LiteLLM reads them anyway: OPENAI_API_BASE / OPENAI_API_KEY,
+ * exported into the ccc daemon alone.
+ */
+export function setYamlEnvs(source: string, vars: Record<string, string>): string {
+  const lines = source.split('\n');
+  const start = lines.findIndex((l) => l.trim() === 'envs:' && !l.startsWith(' '));
+  const kept: string[] = [];
+  for (let i = start + 1; start >= 0 && i < lines.length && (lines[i]!.startsWith(' ') || !lines[i]!.trim()); i++) {
+    const key = /^\s+([A-Za-z_]\w*):/.exec(lines[i]!)?.[1];
+    if (lines[i]!.trim() && !(key && key in vars)) kept.push(lines[i]!);
+  }
+  const body = ['envs:', ...kept, ...Object.entries(vars).map(([k, v]) => `  ${k}: "${v}"`)].join('\n');
+  return replaceYamlSection(source, 'envs', body);
 }
 
 export function gpuAvailable(): { present: boolean; devices: string[] } {
@@ -155,6 +171,12 @@ function which(bin: string): string | undefined {
 
 function have(bin: string): boolean { return Boolean(which(bin)); }
 
+/** Present is not working: an install without its native modules still has a binary. */
+function graphEngineWorks(): boolean {
+  try { execFileSync('gitnexus', ['list'], { stdio: 'ignore', timeout: 60_000 }); return true; }
+  catch { return false; }
+}
+
 function npuEndpointActive(): boolean {
   try {
     execFileSync('curl', ['-fsS', '--max-time', '2', 'http://127.0.0.1:52625/v1/models'],
@@ -184,12 +206,20 @@ export function installEngines(opts: InstallOpts, dry: boolean,
   // The keep-warm unit below runs this script; link it too, or a fresh machine gets a
   // timer pointing at a file that only ever existed on the author's box.
   sh(`ln -sfn "${packageRoot}bin/code-lens-keepwarm" "${homedir()}/.local/bin/code-lens-keepwarm"`, dry);
-  if (have('gitnexus')) console.log('  ✓ graph engine (gitnexus) present');
+  if (have('gitnexus') && graphEngineWorks()) console.log('  ✓ graph engine (gitnexus) present');
   else {
     if (!have('npm')) throw new Error('npm is required to install GitNexus');
     console.log('  installing graph engine…');
     // User prefix avoids root; optional grammars add minutes and a C++ toolchain.
-    sh(`GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1 npm install -g --prefix="${homedir()}/.npm-global" gitnexus@latest`, dry);
+    // npm 11 runs no install scripts unless the package is named, and GitNexus
+    // without them has no parsers and no database: it installs "fine" and then
+    // cannot index anything. Older npm ignores the flag. @scarf/scarf (download
+    // telemetry) is deliberately left out.
+    const allow = ['gitnexus', '@ladybugdb/core', 'onnxruntime-node', 'protobufjs', 'tree-sitter',
+      ...['c-sharp', 'cpp', 'go', 'java', 'javascript', 'php', 'python', 'ruby', 'rust', 'typescript']
+        .map((l) => `tree-sitter-${l}`)].join(',');
+    sh(`GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1 npm install -g --prefix="${homedir()}/.npm-global" ` +
+       `--allow-scripts=${allow} gitnexus@latest`, dry);
   }
   if (!have('uv')) throw new Error('uv is required to install cocoindex-code (ccc)');
 
@@ -288,7 +318,10 @@ export function configureGpu(opts: InstallOpts, dry: boolean,
   if (opts.remoteEmbeddings) {
     const path = join(homedir(), '.cocoindex_code/global_settings.yml');
     const old = existsSync(path) ? readFileSync(path, 'utf8') : '';
-    write(path, replaceYamlSection(old, 'embedding', remoteSemanticBlock(opts.remoteEmbeddings, dry ? '<from embed.env>' : embedToken(false, dry))), dry);
+    const token = dry ? '<from embed.env>' : embedToken(false, dry);
+    const next = setYamlEnvs(replaceYamlSection(old, 'embedding', remoteSemanticBlock()),
+      { OPENAI_API_BASE: opts.remoteEmbeddings, OPENAI_API_KEY: token });
+    write(path, next, dry);
     if (!dry) chmodSync(path, 0o600); // it now carries the token
     if (!dry && have('ccc')) sh('ccc daemon stop >/dev/null 2>&1 || true', false);
     console.log(`  semantic: ${SEMANTIC_MODEL} via ${opts.remoteEmbeddings}`);
@@ -375,7 +408,7 @@ After=network.target
 
 [Service]
 Type=simple
-${env}Environment=PATH=${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
+${env}Environment=PATH=${dirname(process.execPath)}:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
 ExecStart=${graphBin} mcp --http --port ${GRAPH_PORT} --host 127.0.0.1
 # '-': the warm-up script is optional; the installer does not ship it, and a
 # missing one must not fail the engine it only pre-warms.
@@ -397,7 +430,7 @@ Description=code-lens keep-warm — stops engine models from idling out of GPU m
 
 [Service]
 Type=oneshot
-Environment=PATH=${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
+Environment=PATH=${dirname(process.execPath)}:${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
 ExecStart=${homedir()}/.local/bin/code-lens-keepwarm
 `, dry);
 
@@ -424,8 +457,8 @@ Description=code-lens index refresh — incremental update of both engines
 
 [Service]
 Type=oneshot
-Environment=PATH=${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
-${remoteEnv || npuEnv}ExecStart=/usr/bin/node ${repoRootForRefresh}bin/lens.mjs refresh
+Environment=PATH=${dirname(process.execPath)}:${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
+${remoteEnv || npuEnv}ExecStart=${process.execPath} ${repoRootForRefresh}bin/lens.mjs refresh
 `, dry);
 
   write(join(UNIT_DIR, 'code-lens-refresh.timer'), `[Unit]
@@ -450,9 +483,9 @@ After=network.target gitnexus-mcp.service
 
 [Service]
 Type=simple
-Environment=PATH=${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
+Environment=PATH=${dirname(process.execPath)}:${homedir()}/.local/bin:${homedir()}/.npm-global/bin:/usr/local/bin:/usr/bin
 Environment=LENS_PORT=${process.env.LENS_PORT ?? 3939}
-ExecStart=/usr/bin/node ${repoRoot}bin/lens.mjs serve
+ExecStart=${process.execPath} ${repoRoot}bin/lens.mjs serve
 Restart=always
 RestartSec=3
 
@@ -504,7 +537,7 @@ export function verify(dry: boolean): void {
   sh(`"${graphBin}" --version`, false);
   sh(`"${semanticBin}" doctor`, false); // Downloads the model and proves it embeds on the configured device.
   const root = new URL('../..', import.meta.url).pathname;
-  sh(`/usr/bin/node "${root}bin/lens.mjs" doctor --parity`, false);
+  sh(`"${process.execPath}" "${root}bin/lens.mjs" doctor --parity`, false);
 }
 
 export async function install(opts: InstallOpts): Promise<number> {

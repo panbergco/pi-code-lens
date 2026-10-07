@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { placement, remoteSemanticBlock, replaceYamlSection } from '../dist/install/installer.js';
+import { placement, remoteSemanticBlock, replaceYamlSection, setYamlEnvs } from '../dist/install/installer.js';
 
 const original = `# keep me
 embedding:
@@ -48,14 +48,17 @@ console.log('ok — accelerator model config is replaced without deleting unrela
 
 // ── a remote model replaces the local one, and nothing else ─────────────────
 {
-  const block = remoteSemanticBlock('http://10.0.0.5:8767/v1', 'tok');
-  const out = replaceYamlSection(original, 'embedding', block);
+  const out = setYamlEnvs(replaceYamlSection(original, 'embedding', remoteSemanticBlock()),
+    { OPENAI_API_BASE: 'http://10.0.0.5:8767/v1', OPENAI_API_KEY: 'tok' });
   assert.match(out, /provider: litellm/);
   assert.match(out, /model: openai\/Shuu12121\/CodeSearch-ModernBERT-Crow-Plus/,
     'the SAME model, so a remote index matches a local one');
-  assert.match(out, /api_base: http:\/\/10\.0\.0\.5:8767\/v1/);
-  assert.match(out, /api_key: tok/);
+  assert.match(out, /indexing_params: \{\}/, 'ccc rejects anything but input_type here');
   assert.doesNotMatch(out, /sentence-transformers|device:/, 'no local device left behind');
-  assert.match(out, /envs:\n  TOKENIZERS_PARALLELISM: "false"/);
+  assert.match(out, /envs:\n  TOKENIZERS_PARALLELISM: "false"\n  OPENAI_API_BASE: "http:\/\/10\.0\.0\.5:8767\/v1"\n  OPENAI_API_KEY: "tok"/,
+    'endpoint and token join the existing envs');
+  const again = setYamlEnvs(out, { OPENAI_API_BASE: 'http://b/v1', OPENAI_API_KEY: 't2' });
+  assert.equal((again.match(/OPENAI_API_BASE/g) ?? []).length, 1, 're-running replaces, never duplicates');
+  assert.match(again, /TOKENIZERS_PARALLELISM/);
   console.log('ok — remote embeddings point ccc at the served model without touching other settings');
 }
