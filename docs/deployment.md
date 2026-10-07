@@ -187,6 +187,39 @@ are machine-local and never move with the checkout.
 
 ---
 
+## 3a · A machine without a usable GPU — embed through one that has it
+
+One host serves the semantic model; others embed through it. Only text to be
+embedded crosses the network — **every index stays on the machine that owns the
+repository**, and both engines on the client still run locally.
+
+```bash
+# on the GPU host (its ccc must already have the model, i.e. a normal install)
+lens install --hot-load --serve-embeddings          # code-lens-embed.service, port 8767
+# copy the shared secret to each client
+scp gpu-host:.config/code-lens/embed.env ~/.config/code-lens/embed.env
+# on the client
+lens install --hot-load --remote-embeddings http://<gpu-host>:8767/v1
+```
+
+- **Server:** `bin/code-lens-embed-server`, run by ccc's own venv Python on the
+  semantic GPU. OpenAI-compatible `/v1/embeddings`; `/health` is open, everything
+  else needs the bearer token from `~/.config/code-lens/embed.env` (mode 600). Batch
+  16, halved automatically on out-of-memory (a shared 6 GB card ran out at 64).
+- **Client, semantic:** ccc's LiteLLM provider, model
+  `openai/Shuu12121/CodeSearch-ModernBERT-Crow-Plus`; endpoint and token in
+  `global_settings.yml` `envs:` as `OPENAI_API_BASE`/`OPENAI_API_KEY` (ccc ≥ 0.2.4x
+  rejects them in `indexing_params`). Installed without `[full]`: no torch.
+- **Client, graph:** GitNexus runs on the CPU (parsing and traversal need no GPU);
+  if a repository is analysed with `--embeddings`, its HTTP route
+  (`GITNEXUS_EMBEDDING_URL`, 768 dimensions) uses the same served model for index and
+  query alike.
+- **Same model, same vectors.** Measured 2026-10-07: cosine 1.00000 between the
+  served vector and a local encode of the same text; 10 ms per query over the LAN
+  (0.8 ms ping); a 437-file repository indexed in 163 s.
+- **Dependency:** while the GPU host is off, semantic search and indexing fail;
+  graph answers continue.
+
 ## 4 · Hot-loaded models — and why a service is not enough
 
 A service keeps a *process* alive. It does not keep a *model* loaded.
