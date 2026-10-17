@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectLayers, indexRunning, loadEngineEnv, saveState, minGapMs } from '../dist/commands/refresh.js';
+import { detectLayers, indexRunning, loadEngineEnv, saveState, minGapMs, lockHolderAlive } from '../dist/commands/refresh.js';
 
 // ── every indexing pass must be recognised, including the vector one ─────────
 // These decoys look EXACTLY like a real indexing pass, because that is the
@@ -319,4 +319,16 @@ console.log('ok — the engine is launched only when its own rule says there is 
 // below it — the state-merge guard, proportional cadence, heal-on-read — never
 // executed while the suite reported green. It must stay the last statement.
 reapDecoys();
+// ── an empty lock has no holder ─────────────────────────────────────────────
+// A full disk killed a refresh between creating its lock and writing its pid,
+// leaving an empty file. Number('') is 0 and kill(0, 0) signals our own process
+// group, so the lock read as held by a live process for 3 hours and every
+// refresh behind it skipped. Only a real, running pid can hold the lock.
+assert.equal(lockHolderAlive(Number('')), false, 'pid 0 (an empty lock) holds nothing');
+assert.equal(lockHolderAlive(NaN), false, 'garbage in the lock holds nothing');
+assert.equal(lockHolderAlive(-1), false, 'a negative pid holds nothing');
+assert.equal(lockHolderAlive(process.pid), true, 'a running process can hold it');
+assert.equal(lockHolderAlive(2 ** 22 + 12345), false, 'a pid that is not running holds nothing');
+console.log('ok — an empty or dead lock is cleared, never treated as a live holder');
+
 process.exit(0);

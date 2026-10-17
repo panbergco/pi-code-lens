@@ -118,6 +118,20 @@ export const saveState = (s: State, file = STATE) => {
 };
 
 /**
+ * Can this pid be a refresh that still holds the lock?
+ *
+ * An EMPTY lock is a refresh that died while writing its own pid — a full disk
+ * did exactly that. Number('') is 0, and kill(0, 0) signals the caller's own
+ * process group, which always succeeds, so the lock read as held by a live
+ * process forever and every later refresh skipped behind it. Only a real pid
+ * can be a holder.
+ */
+export function lockHolderAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
  * Is ANY index work in flight? Checked by process, because that is the truth.
  *
  * The vector pass belongs on this list. It was missing, and the timer started a
@@ -491,8 +505,7 @@ export async function refresh(o: RefreshOpts = {}): Promise<number> {
   // still exists.
   if (existsSync(LOCK)) {
     const pid = Number(readFileSync(LOCK, 'utf8').trim());
-    let alive = false;
-    try { process.kill(pid, 0); alive = true; } catch { /* gone */ }
+    const alive = lockHolderAlive(pid);
     if (alive) {
       // A live holder can still be stuck: a refresh run inside a pi session held
       // this lock for as long as its stalled semantic pass (up to 4 h), and every
