@@ -55,7 +55,7 @@ console.log('ok — accelerator model config is replaced without deleting unrela
     'the SAME model, so a remote index matches a local one');
   assert.match(out, /indexing_params: \{\}/, 'ccc rejects anything but input_type here');
   assert.doesNotMatch(out, /sentence-transformers|device:/, 'no local device left behind');
-  assert.match(out, /envs:\n  TOKENIZERS_PARALLELISM: "false"\n  OPENAI_API_BASE: "http:\/\/10\.0\.0\.5:8767\/v1"\n  OPENAI_API_KEY: "tok"/,
+  assert.match(out, /envs:\n  TOKENIZERS_PARALLELISM: "false"\n  OPENAI_API_BASE: "http:\/\/192\.0\.2\.5:8767\/v1"\n  OPENAI_API_KEY: "tok"/,
     'endpoint and token join the existing envs');
   const again = setYamlEnvs(out, { OPENAI_API_BASE: 'http://b/v1', OPENAI_API_KEY: 't2' });
   assert.equal((again.match(/OPENAI_API_BASE/g) ?? []).length, 1, 're-running replaces, never duplicates');
