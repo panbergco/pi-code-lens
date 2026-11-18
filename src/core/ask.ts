@@ -105,7 +105,7 @@ export async function ask(input: AskInput, engines?: Engines): Promise<AskResult
         ? `structure is being rebuilt right now — ask again in a moment; ` +
           `text matches below are unaffected`
         : `structure unavailable: the graph engine has no index for "${target}" ` +
-          `(indexed: ${gh.repos.join(', ') || 'none'}) — run: gitnexus analyze`);
+          `(indexed: ${gh.repos.join(', ') || 'none'}) — run: gitnexus analyze --index-only`);
     } else {
       try {
         // A retrieval call that can take two minutes is not retrieval. Measured

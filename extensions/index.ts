@@ -362,7 +362,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       "Load the pi-code-lens skill for the full locate → blast-radius → change-review sequence.",
       "Both lens engines index PER REPOSITORY, and answers only cover indexed repos. A '! no index' " +
         "or 'not indexed' note means the repo needs one-time indexing first — graph: run " +
-        "`gitnexus analyze` in the repo; semantic: lens_semantic {command:'index'}. Check coverage with /lens. " +
+        "`gitnexus analyze --index-only` in the repo; semantic: lens_semantic {command:'index'}. Check coverage with /lens. " +
         "Repo scope is resolved per call from cwd (or an explicit repo param) — concurrent use from other " +
         "agents/harnesses cannot change your scope.",
     ],
@@ -634,7 +634,7 @@ export default function piCodeLens(pi: ExtensionAPI) {
       : f.state === "stale" ? `indexed · STALE — ${f.behind} commit${f.behind === 1 ? "" : "s"} behind` +
                               (problems.length ? "" : " (auto-refresh will catch up; or say the word)")
       : f.state === "refreshing" ? "reindexing now…"
-      : "NOT graph-indexed — run `gitnexus analyze` here once; until then answers degrade with named notes";
+      : "NOT graph-indexed — run `gitnexus analyze --index-only` here once; until then answers degrade with named notes";
     const lines = [
       ...problems.map((p) => `✗ ${p}`),
       `hot server (:${process.env.LENS_PORT ?? 3939}): ${hot ? "up — answers come from the shared warm service" : "down — falling back in-process (still thin clients)"}`,

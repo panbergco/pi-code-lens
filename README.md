@@ -34,7 +34,7 @@ node bin/lens.mjs install --hot-load --npu    # Ryzen AI: Radeon ccc + XDNA2 Git
 
 Without the engines, the pi tools and CLI degrade with named notes (they never
 crash) — but every answer will say the engine is unreachable. Each repository
-also needs one-time indexing (`gitnexus analyze` in the repo; the pi extension
+also needs one-time indexing (`gitnexus analyze --index-only` in the repo; the pi extension
 detects missing/stale indexes and says exactly what to run).
 
 ## Pi integration

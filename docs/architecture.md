@@ -98,7 +98,7 @@ partial answer names what was missing:
 | situation | reported as |
 |---|---|
 | semantic engine has no index for this repo | `DEGRADED: recall came from the graph engine's weaker model` |
-| graph has no index for this repo | `structure unavailable: … — run: gitnexus analyze` |
+| graph has no index for this repo | `structure unavailable: … — run: gitnexus analyze --index-only` |
 | candidates are flows, not symbols | `flow-level results: no symbol anchors to expand` |
 | an engine is down | named in the note with its error |
 

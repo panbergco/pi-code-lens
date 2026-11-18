@@ -46,7 +46,7 @@ An answer carrying `! no index`, `not indexed`, or a staleness note is low-confi
 silently downgrade to a broad grep.
 
 - Semantic index: `lens_semantic { command: "index" }`
-- Graph index: run `gitnexus analyze` once in the repository
+- Graph index: run `gitnexus analyze --index-only` once in the repository (plain `analyze` writes into AGENTS.md, CLAUDE.md and the skill folders)
 - Status and coverage: `/lens`
 
 Then repeat the original call. Report the gap if it cannot be fixed.
