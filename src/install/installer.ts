@@ -39,7 +39,7 @@ export interface InstallOpts {
   embedPort?: number;
   /**
    * Embed through another host's served model instead of a local one: its base
-   * URL, e.g. `http://192.168.1.20:8767/v1`. No local model, no torch download;
+   * URL, e.g. `http://192.0.2.20:8767/v1`. No local model, no torch download;
    * the indexes still live in each repo on THIS host.
    */
   remoteEmbeddings?: string;

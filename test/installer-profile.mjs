@@ -49,7 +49,7 @@ console.log('ok — accelerator model config is replaced without deleting unrela
 // ── a remote model replaces the local one, and nothing else ─────────────────
 {
   const out = setYamlEnvs(replaceYamlSection(original, 'embedding', remoteSemanticBlock()),
-    { OPENAI_API_BASE: 'http://10.0.0.5:8767/v1', OPENAI_API_KEY: 'tok' });
+    { OPENAI_API_BASE: 'http://192.0.2.5:8767/v1', OPENAI_API_KEY: 'tok' });
   assert.match(out, /provider: litellm/);
   assert.match(out, /model: openai\/Shuu12121\/CodeSearch-ModernBERT-Crow-Plus/,
     'the SAME model, so a remote index matches a local one');
